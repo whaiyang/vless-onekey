@@ -201,8 +201,8 @@ generate_reality_material() {
   fi
 
   X25519_OUTPUT="$("${XRAY_BIN}" x25519)"
-  PRIVATE_KEY="$(awk -F': ' '/Private key/ {print $2}' <<<"${X25519_OUTPUT}")"
-  PUBLIC_KEY="$(awk -F': ' '/Public key/ {print $2}' <<<"${X25519_OUTPUT}")"
+  PRIVATE_KEY="$(awk -F': ' '/^Private[Kk]ey/ || /^Private key/ {print $2; exit}' <<<"${X25519_OUTPUT}")"
+  PUBLIC_KEY="$(awk -F': ' '/^Public[Kk]ey/ || /^Public key/ || /^Password \(PublicKey\)/ {print $2; exit}' <<<"${X25519_OUTPUT}")"
 
   if [[ -z "${PRIVATE_KEY}" || -z "${PUBLIC_KEY}" ]]; then
     echo "Failed to generate Reality keys." >&2

@@ -376,8 +376,8 @@ generate_reality_material() {
   SHORT_ID="$(openssl rand -hex 8)"
   local x25519_output
   x25519_output="$("${XRAY_BIN}" x25519)"
-  PRIVATE_KEY="$(awk -F': ' '/Private key/ {print $2}' <<<"${x25519_output}")"
-  PUBLIC_KEY="$(awk -F': ' '/Public key/ {print $2}' <<<"${x25519_output}")"
+  PRIVATE_KEY="$(awk -F': ' '/^Private[Kk]ey/ || /^Private key/ {print $2; exit}' <<<"${x25519_output}")"
+  PUBLIC_KEY="$(awk -F': ' '/^Public[Kk]ey/ || /^Public key/ || /^Password \(PublicKey\)/ {print $2; exit}' <<<"${x25519_output}")"
 
   [[ -n "${PRIVATE_KEY}" && -n "${PUBLIC_KEY}" ]] || die "Failed to generate Reality keys."
 }
