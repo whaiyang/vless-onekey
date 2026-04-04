@@ -1,6 +1,6 @@
-# vless-onekey
+# Xray VLESS Reality One-Click Installer
 
-一键安装 `Xray + VLESS + Reality`，并自动导出 `clashverge.yaml`、`shadowrocket.conf`、`node.vless.txt` 和 `shadowrocket-node.png`。
+One-click install Xray VLESS Reality on Debian and Ubuntu. Automatically export Clash Verge config, Shadowrocket QR, VLESS node link, and support IPv4/IPv6 auto-detect.
 
 ## 一键安装
 
