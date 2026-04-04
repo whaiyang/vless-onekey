@@ -6,7 +6,7 @@ SCRIPT_VERSION="1.1.0"
 XRAY_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 
 PORT=""
-SNI="www.cloudflare.com"
+SNI=""
 DEST_HOST=""
 DEST_PORT="443"
 NODE_NAME=""
@@ -26,6 +26,16 @@ CONFIG_FILE="/usr/local/etc/xray/config.json"
 CONFIG_BACKUP_FILE=""
 CONFIG_WAS_BACKED_UP="0"
 XRAY_BIN=""
+DEFAULT_SNI_POOL=(
+  "www.qq.com"
+  "www.taobao.com"
+  "www.jd.com"
+  "www.bilibili.com"
+  "www.zhihu.com"
+  "www.sina.com.cn"
+  "www.163.com"
+  "www.douban.com"
+)
 
 usage() {
   cat <<EOF
@@ -38,7 +48,7 @@ Usage:
 
 Options:
   --port PORT               Listen port for VLESS Reality. Default: random 20000-40000
-  --sni HOST                SNI and Reality serverNames. Default: ${SNI}
+  --sni HOST                SNI and Reality serverNames. Default: random common China HTTPS domain
   --dest-host HOST          Reality dest host. Default: same as --sni
   --dest-port PORT          Reality dest port. Default: ${DEST_PORT}
   --node-name NAME          Exported node name. Default: server hostname
@@ -54,11 +64,11 @@ Options:
   -h, --help                Show this help
 
 Examples:
-  bash ${SCRIPT_NAME} --sni www.cloudflare.com --node-name my-vps
-  bash ${SCRIPT_NAME} --sni www.cloudflare.com --node-name my-vps -y --force-overwrite
+  bash ${SCRIPT_NAME} -y
+  bash ${SCRIPT_NAME} -y --node-name my-vps --force-overwrite
 
 GitHub Raw example:
-  bash <(curl -fsSL https://raw.githubusercontent.com/<you>/<repo>/main/${SCRIPT_NAME}) -y --sni www.cloudflare.com --node-name my-vps
+  bash <(curl -fsSL https://raw.githubusercontent.com/<you>/<repo>/main/${SCRIPT_NAME}) -y
 EOF
 }
 
@@ -205,6 +215,11 @@ validate_args() {
 ensure_defaults() {
   if [[ -z "${PORT}" ]]; then
     PORT="$(shuf -i 20000-40000 -n 1)"
+  fi
+  if [[ -z "${SNI}" ]]; then
+    local index
+    index="$(shuf -i 0-$((${#DEFAULT_SNI_POOL[@]} - 1)) -n 1)"
+    SNI="${DEFAULT_SNI_POOL[${index}]}"
   fi
   if [[ -z "${DEST_HOST}" ]]; then
     DEST_HOST="${SNI}"

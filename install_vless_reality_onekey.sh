@@ -2,13 +2,23 @@
 set -euo pipefail
 
 PORT=""
-SNI="www.sony.com"
+SNI=""
 DEST_HOST=""
 DEST_PORT="443"
 NODE_NAME=""
 CLIENT_FINGERPRINT="chrome"
 ARTIFACT_DIR="/root/vless-export"
 PUBLIC_IP=""
+DEFAULT_SNI_POOL=(
+  "www.qq.com"
+  "www.taobao.com"
+  "www.jd.com"
+  "www.bilibili.com"
+  "www.zhihu.com"
+  "www.sina.com.cn"
+  "www.163.com"
+  "www.douban.com"
+)
 
 usage() {
   cat <<'EOF'
@@ -17,7 +27,7 @@ Usage:
 
 Options:
   --port PORT               Listen port for VLESS Reality. Default: random 20000-40000
-  --sni HOST                SNI and serverNames value. Default: www.sony.com
+  --sni HOST                SNI and serverNames value. Default: random common China HTTPS domain
   --dest-host HOST          Reality dest host. Default: same as --sni
   --dest-port PORT          Reality dest port. Default: 443
   --node-name NAME          Exported node name. Default: server hostname
@@ -27,7 +37,7 @@ Options:
   -h, --help                Show this help
 
 Example:
-  bash install_vless_reality_onekey.sh --sni www.cloudflare.com --node-name my-vps
+  bash install_vless_reality_onekey.sh
 EOF
 }
 
@@ -93,6 +103,11 @@ parse_args() {
 ensure_defaults() {
   if [[ -z "${PORT}" ]]; then
     PORT="$(shuf -i 20000-40000 -n 1)"
+  fi
+  if [[ -z "${SNI}" ]]; then
+    local index
+    index="$(shuf -i 0-$((${#DEFAULT_SNI_POOL[@]} - 1)) -n 1)"
+    SNI="${DEFAULT_SNI_POOL[${index}]}"
   fi
   if [[ -z "${DEST_HOST}" ]]; then
     DEST_HOST="${SNI}"

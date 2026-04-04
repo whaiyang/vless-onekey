@@ -5,7 +5,7 @@
 ## 一键安装
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/install.sh) -y --sni www.cloudflare.com --node-name my-vps
+bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/install.sh) -y
 ```
 
 查看参数：
@@ -58,5 +58,6 @@ sz /root/vless-export/shadowrocket-node.png
 ## 说明
 
 - 默认发现已有 `xray` 配置时会拒绝覆盖，只有显式加 `--force-overwrite` 才会替换并先备份。
+- 默认会随机选择一个常见国内 HTTPS 域名作为 `SNI`，也可以手动传 `--sni` 指定。
 - `shadowrocket-node.png` 适合直接给 `Shadowrocket` 扫码。
 - `clashverge.yaml` 适合 `Clash Verge / Clash Mi / Karing` 导入。
