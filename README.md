@@ -22,12 +22,18 @@ bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/i
 /root/vless-export
 ```
 
-- `node.vless.txt`
 - `clashverge.yaml`
-- `shadowrocket.conf`
+  给 `Clash Verge / Clash Mi / Karing` 导入的配置文件。
 - `shadowrocket-node.png`
+  给 `Shadowrocket` 直接扫码导入的二维码。
+- `node.vless.txt`
+  单节点 `vless://` 链接文本。
+- `shadowrocket.conf`
+  `Shadowrocket` 配置文件。
 - `metadata.json`
+  节点参数明细，方便手工排查。
 - `README.txt`
+  服务器端生成结果说明。
 
 ## 下载到本地
 
@@ -35,6 +41,18 @@ bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/i
 
 ```bash
 sz /root/vless-export/*
+```
+
+只下载 `clashverge.yaml`：
+
+```bash
+sz /root/vless-export/clashverge.yaml
+```
+
+只下载二维码：
+
+```bash
+sz /root/vless-export/shadowrocket-node.png
 ```
 
 ## 说明
