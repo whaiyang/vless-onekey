@@ -17,13 +17,6 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/install.sh) -y --sni www.cloudflare.com --node-name my-vps
 ```
 
-更稳的两步式：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/install.sh -o install.sh
-bash install.sh -y --sni www.cloudflare.com --node-name my-vps
-```
-
 ## 常用参数
 
 ```bash
