@@ -827,8 +827,8 @@ main() {
   parse_args "$@"
   need_root
   detect_os
-  validate_args
   ensure_defaults
+  validate_args
   confirm_plan
   install_dependencies
   ensure_required_commands
