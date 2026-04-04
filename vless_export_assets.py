@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import re
 import sys
@@ -124,8 +125,15 @@ def build_vless_url(node: dict[str, str | int]) -> str:
         }
     )
     fragment = urllib.parse.quote(str(node["name"]), safe="")
+    server = str(node["server"])
+    try:
+        address = ipaddress.ip_address(server)
+    except ValueError:
+        url_server = server
+    else:
+        url_server = f"[{server}]" if address.version == 6 else server
     return (
-        f"vless://{node['uuid']}@{node['server']}:{node['port']}"
+        f"vless://{node['uuid']}@{url_server}:{node['port']}"
         f"?{query}#{fragment}"
     )
 
@@ -138,7 +146,7 @@ allow-lan: true
 bind-address: '*'
 mode: rule
 log-level: info
-ipv6: false
+ipv6: true
 external-controller: {controller}
 unified-delay: true
 
@@ -153,7 +161,7 @@ tun:
 dns:
   enable: true
   listen: 0.0.0.0:1053
-  ipv6: false
+  ipv6: true
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
 
@@ -187,18 +195,18 @@ rule-providers:
 proxies:
   - name: "{name}"
     type: vless
-    server: {node["server"]}
+    server: "{node["server"]}"
     port: {node["port"]}
     uuid: {node["uuid"]}
     network: tcp
     tls: true
     udp: true
-    servername: {node["sni"]}
-    client-fingerprint: {node["fingerprint"]}
-    flow: {node["flow"]}
+    servername: "{node["sni"]}"
+    client-fingerprint: "{node["fingerprint"]}"
+    flow: "{node["flow"]}"
     reality-opts:
-      public-key: {node["public_key"]}
-      short-id: {node["short_id"]}
+      public-key: "{node["public_key"]}"
+      short-id: "{node["short_id"]}"
 
 proxy-groups:
   - name: "节点选择"
@@ -229,7 +237,7 @@ bypass-system = true
 skip-proxy = 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, localhost, *.local
 bypass-tun = 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 224.0.0.0/4
 dns-server = 223.5.5.5, 119.29.29.29, 1.1.1.1, 8.8.8.8
-ipv6 = false
+ipv6 = true
 
 [Proxy]
 {name} = vless, {node["server"]}, {node["port"]}, username={node["uuid"]}, tls=true, sni={node["sni"]}, xtls=1, public-key={node["public_key"]}, short-id={node["short_id"]}, flow={node["flow"]}, fingerprint={node["fingerprint"]}
