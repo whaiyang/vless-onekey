@@ -43,7 +43,13 @@ bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/i
 
 ## 下载到本地
 
-脚本会安装 `lrzsz`，支持直接用 `sz` 下载：
+脚本会安装 `lrzsz`，执行完成后默认自动运行：
+
+```bash
+sz /root/vless-export/clashverge.yaml
+```
+
+也可以手动用 `sz` 下载：
 
 ```bash
 sz /root/vless-export/*
@@ -68,6 +74,7 @@ sz /root/vless-export/shadowrocket-node.png
 - 如果需要保留服务器上已有的 `xray` 二进制，可以传 `--skip-xray-upgrade`。
 - 默认启用每日自动更新，默认时间为服务器本地时间 `03:30:00`，也可以用 `--auto-update-time HH:MM` 指定。
 - 如果不想启用自动更新，可以传 `--skip-auto-update-xray`。
+- 默认安装结束会自动执行 `sz /root/vless-export/clashverge.yaml`，如果终端不支持 ZMODEM，可以传 `--skip-sz`。
 - 自动更新由 `systemd` 管理：`xray-auto-update.timer` 和 `xray-auto-update.service`。
 - 可以传 `--xray-beta` 使用 Xray 最新预发布版本；如果同时启用自动更新，后续自动更新也会跟随预发布通道。
 - 默认会随机选择一个常见国内 HTTPS 域名作为 `SNI`，也可以手动传 `--sni` 指定。

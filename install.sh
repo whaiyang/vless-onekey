@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 SCRIPT_NAME="install.sh"
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.3.0"
 XRAY_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 XRAY_AUTO_UPDATE_SCRIPT="/usr/local/sbin/xray-auto-update.sh"
 XRAY_AUTO_UPDATE_SERVICE="/etc/systemd/system/xray-auto-update.service"
@@ -23,6 +23,7 @@ FORCE_OVERWRITE="0"
 SKIP_FIREWALL="0"
 SKIP_PACKAGES="0"
 SKIP_QR="0"
+SKIP_SZ="0"
 SKIP_XRAY_UPGRADE="0"
 XRAY_BETA="0"
 AUTO_UPDATE_XRAY="1"
@@ -75,6 +76,7 @@ Options:
   --skip-firewall           Do not change UFW rules
   --skip-packages           Skip apt package installation
   --skip-qr                 Do not generate Shadowrocket QR PNG
+  --skip-sz                 Do not auto-download clashverge.yaml with sz at the end
   -y, --yes                 Run non-interactively
   -V, --version             Show script version
   -h, --help                Show this help
@@ -215,6 +217,10 @@ parse_args() {
         SKIP_QR="1"
         shift
         ;;
+      --skip-sz)
+        SKIP_SZ="1"
+        shift
+        ;;
       -y|--yes)
         ASSUME_YES="1"
         shift
@@ -314,6 +320,7 @@ Auto update at : ${AUTO_UPDATE_TIME}
 Skip firewall  : ${SKIP_FIREWALL}
 Skip packages  : ${SKIP_PACKAGES}
 Skip QR        : ${SKIP_QR}
+Auto sz Clash  : $([[ "${SKIP_SZ}" == "1" ]] && printf 'no' || printf 'yes')
 EOF
 
   if [[ "${KEEP_EXISTING_CONFIG}" == "1" ]]; then
@@ -617,7 +624,7 @@ import sys
 import urllib.parse
 from pathlib import Path
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 DEFAULT_NODE_NAME = "vless-reality"
 DEFAULT_FINGERPRINT = "chrome"
 
@@ -924,6 +931,7 @@ Notes:
   - sz requires a ZMODEM-capable terminal such as Xshell, SecureCRT, or MobaXterm.
   - shadowrocket-node.png is a VLESS QR code for direct Shadowrocket scanning.
   - clashverge.yaml is intended for Clash Verge, Clash Mi, or Karing.
+  - install.sh automatically runs: sz ${ARTIFACT_DIR}/clashverge.yaml
 EOF
 }
 
@@ -935,6 +943,7 @@ Xray service   : $(systemctl is-active xray)
 Config file    : ${CONFIG_FILE}
 Artifact dir   : ${ARTIFACT_DIR}
 Auto update    : $([[ "${AUTO_UPDATE_XRAY}" == "1" ]] && printf 'xray-auto-update.timer at %s' "${AUTO_UPDATE_TIME}" || printf 'disabled')
+Auto sz Clash  : $([[ "${SKIP_SZ}" == "1" ]] && printf 'disabled' || printf 'enabled')
 
 VLESS URL:
 ${VLESS_URL}
@@ -948,6 +957,35 @@ EOF
   fi
 }
 
+send_clashverge_yaml() {
+  local target="${ARTIFACT_DIR}/clashverge.yaml"
+
+  if [[ "${SKIP_SZ}" == "1" ]]; then
+    log "Skipping automatic clashverge.yaml download by request"
+    return
+  fi
+
+  if [[ ! -f "${target}" ]]; then
+    warn "clashverge.yaml was not found at ${target}; skipping automatic sz download."
+    return
+  fi
+
+  if ! command_exists sz; then
+    warn "sz is not installed; skipping automatic clashverge.yaml download."
+    warn "Install lrzsz or download manually: ${target}"
+    return
+  fi
+
+  if [[ ! -t 1 ]]; then
+    warn "stdout is not a terminal; skipping automatic sz download."
+    warn "Download manually later with: sz ${target}"
+    return
+  fi
+
+  log "Starting automatic download: sz ${target}"
+  sz "${target}" || warn "Automatic sz download failed. You can run manually: sz ${target}"
+}
+
 print_maintenance_summary() {
   log "Xray maintenance complete"
   cat <<EOF
@@ -957,6 +995,7 @@ Xray binary    : ${XRAY_BIN}
 Config file    : ${CONFIG_FILE}
 Config action  : preserved existing config
 Auto update    : $([[ "${AUTO_UPDATE_XRAY}" == "1" ]] && printf 'xray-auto-update.timer at %s' "${AUTO_UPDATE_TIME}" || printf 'disabled')
+Auto sz Clash  : $([[ "${SKIP_SZ}" == "1" ]] && printf 'disabled' || printf 'enabled')
 
 Existing Xray config was not replaced.
 Re-run with --force-overwrite to generate a new VLESS Reality config and export assets.
@@ -976,6 +1015,7 @@ main() {
   if [[ "${KEEP_EXISTING_CONFIG}" == "1" ]]; then
     configure_xray_auto_update
     print_maintenance_summary
+    send_clashverge_yaml
     return
   fi
   detect_public_ip
@@ -985,6 +1025,7 @@ main() {
   configure_firewall
   generate_assets
   print_summary
+  send_clashverge_yaml
 }
 
 main "$@"
