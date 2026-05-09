@@ -415,6 +415,8 @@ configure_xray_auto_update() {
     beta_arg=" --beta"
   fi
 
+  mkdir -p "$(dirname "${XRAY_AUTO_UPDATE_SCRIPT}")"
+
   cat > "${XRAY_AUTO_UPDATE_SCRIPT}" <<EOF
 #!/usr/bin/env bash
 set -Eeuo pipefail
