@@ -2,8 +2,11 @@
 set -Eeuo pipefail
 
 SCRIPT_NAME="install.sh"
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 XRAY_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
+XRAY_AUTO_UPDATE_SCRIPT="/usr/local/sbin/xray-auto-update.sh"
+XRAY_AUTO_UPDATE_SERVICE="/etc/systemd/system/xray-auto-update.service"
+XRAY_AUTO_UPDATE_TIMER="/etc/systemd/system/xray-auto-update.timer"
 
 PORT=""
 SNI=""
@@ -20,12 +23,17 @@ FORCE_OVERWRITE="0"
 SKIP_FIREWALL="0"
 SKIP_PACKAGES="0"
 SKIP_QR="0"
+SKIP_XRAY_UPGRADE="0"
+XRAY_BETA="0"
+AUTO_UPDATE_XRAY="1"
+AUTO_UPDATE_TIME="03:30:00"
 
 OS_ID=""
 OS_VERSION_ID=""
 CONFIG_FILE="/usr/local/etc/xray/config.json"
 CONFIG_BACKUP_FILE=""
 CONFIG_WAS_BACKED_UP="0"
+KEEP_EXISTING_CONFIG="0"
 XRAY_BIN=""
 XRAY_LISTEN="0.0.0.0"
 DEFAULT_SNI_POOL=(
@@ -58,6 +66,12 @@ Options:
   --artifact-dir PATH       Directory for generated files. Default: ${ARTIFACT_DIR}
   --public-ip IP            Override auto-detected public IP
   --force-overwrite         Replace an existing Xray config after creating a timestamped backup
+  --upgrade-xray            Update existing Xray to latest stable release. This is the default
+  --skip-xray-upgrade       Keep an existing Xray binary instead of checking for updates
+  --xray-beta               Install/update latest Xray pre-release instead of stable release
+  --auto-update-xray        Enable a daily systemd timer to update Xray automatically. This is the default
+  --skip-auto-update-xray   Do not enable the Xray automatic update timer
+  --auto-update-time TIME   Daily auto-update time in HH:MM or HH:MM:SS. Default: ${AUTO_UPDATE_TIME}
   --skip-firewall           Do not change UFW rules
   --skip-packages           Skip apt package installation
   --skip-qr                 Do not generate Shadowrocket QR PNG
@@ -165,6 +179,30 @@ parse_args() {
         FORCE_OVERWRITE="1"
         shift
         ;;
+      --upgrade-xray)
+        SKIP_XRAY_UPGRADE="0"
+        shift
+        ;;
+      --skip-xray-upgrade)
+        SKIP_XRAY_UPGRADE="1"
+        shift
+        ;;
+      --xray-beta)
+        XRAY_BETA="1"
+        shift
+        ;;
+      --auto-update-xray)
+        AUTO_UPDATE_XRAY="1"
+        shift
+        ;;
+      --skip-auto-update-xray)
+        AUTO_UPDATE_XRAY="0"
+        shift
+        ;;
+      --auto-update-time)
+        AUTO_UPDATE_TIME="${2:-}"
+        shift 2
+        ;;
       --skip-firewall)
         SKIP_FIREWALL="1"
         shift
@@ -225,6 +263,11 @@ validate_args() {
 
   [[ "${DEST_PORT}" =~ ^[0-9]+$ ]] || die "--dest-port must be a number"
   (( DEST_PORT >= 1 && DEST_PORT <= 65535 )) || die "--dest-port must be between 1 and 65535"
+
+  [[ "${AUTO_UPDATE_TIME}" =~ ^([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$ ]] || die "--auto-update-time must be HH:MM or HH:MM:SS"
+  if [[ "${AUTO_UPDATE_TIME}" =~ ^[0-9]{2}:[0-9]{2}$ ]]; then
+    AUTO_UPDATE_TIME="${AUTO_UPDATE_TIME}:00"
+  fi
 }
 
 ensure_defaults() {
@@ -245,23 +288,37 @@ ensure_defaults() {
 }
 
 confirm_plan() {
+  local config_action="write new config"
+  if [[ -f "${CONFIG_FILE}" && "${FORCE_OVERWRITE}" != "1" ]]; then
+    KEEP_EXISTING_CONFIG="1"
+    config_action="preserve existing config"
+  elif [[ -f "${CONFIG_FILE}" && "${FORCE_OVERWRITE}" == "1" ]]; then
+    config_action="backup and replace config"
+  fi
+
   log "Release-ready installer summary"
   cat <<EOF
 Script version : ${SCRIPT_VERSION}
 OS             : ${OS_ID} ${OS_VERSION_ID}
+Config action  : ${config_action}
 Listen port    : ${PORT}
 SNI            : ${SNI}
 Reality dest   : ${DEST_HOST}:${DEST_PORT}
 Node name      : ${NODE_NAME}
 Fingerprint    : ${CLIENT_FINGERPRINT}
 Artifact dir   : ${ARTIFACT_DIR}
+Xray channel   : $([[ "${XRAY_BETA}" == "1" ]] && printf 'pre-release' || printf 'stable')
+Upgrade Xray   : $([[ "${SKIP_XRAY_UPGRADE}" == "1" ]] && printf 'no' || printf 'yes')
+Auto update    : ${AUTO_UPDATE_XRAY}
+Auto update at : ${AUTO_UPDATE_TIME}
 Skip firewall  : ${SKIP_FIREWALL}
 Skip packages  : ${SKIP_PACKAGES}
 Skip QR        : ${SKIP_QR}
 EOF
 
-  if [[ -f "${CONFIG_FILE}" && "${FORCE_OVERWRITE}" != "1" ]]; then
-    die "Existing Xray config found at ${CONFIG_FILE}. Re-run with --force-overwrite if you really want to replace it."
+  if [[ "${KEEP_EXISTING_CONFIG}" == "1" ]]; then
+    warn "Existing Xray config found at ${CONFIG_FILE}; it will be preserved."
+    warn "Re-run with --force-overwrite if you really want to replace it and export a new node."
   fi
 
   if [[ "${ASSUME_YES}" == "1" ]]; then
@@ -320,18 +377,83 @@ ensure_required_commands() {
 }
 
 install_xray() {
+  local installer_args=(install -u root)
+  if [[ "${XRAY_BETA}" == "1" ]]; then
+    installer_args+=(--beta)
+  fi
+
   if command_exists xray; then
     XRAY_BIN="$(command -v xray)"
     log "Xray already installed at ${XRAY_BIN}"
-    return
+    if [[ "${SKIP_XRAY_UPGRADE}" == "1" ]]; then
+      log "Skipping Xray update check by request"
+      return
+    fi
+    log "Checking/updating Xray via the official installer"
+  else
+    log "Installing Xray via the official installer"
   fi
 
-  log "Installing Xray via the official installer"
-  bash -c "$(curl -fsSL "${XRAY_INSTALLER_URL}")" @ install -u root
+  bash -c "$(curl -fsSL "${XRAY_INSTALLER_URL}")" @ "${installer_args[@]}"
 
   XRAY_BIN="$(command -v xray || true)"
   [[ -n "${XRAY_BIN}" ]] || XRAY_BIN="/usr/local/bin/xray"
   [[ -x "${XRAY_BIN}" ]] || die "Xray installation completed but xray binary was not found."
+}
+
+configure_xray_auto_update() {
+  if [[ "${AUTO_UPDATE_XRAY}" != "1" ]]; then
+    return
+  fi
+
+  command_exists systemctl || die "systemctl is required to enable Xray auto update."
+  log "Enabling Xray automatic updates"
+
+  local beta_arg=""
+  local xray_binary="${XRAY_BIN:-/usr/local/bin/xray}"
+  if [[ "${XRAY_BETA}" == "1" ]]; then
+    beta_arg=" --beta"
+  fi
+
+  cat > "${XRAY_AUTO_UPDATE_SCRIPT}" <<EOF
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+XRAY_INSTALLER_URL="${XRAY_INSTALLER_URL}"
+
+bash -c "\$(curl -fsSL "\${XRAY_INSTALLER_URL}")" @ install -u root --no-update-service${beta_arg}
+EOF
+  chmod 700 "${XRAY_AUTO_UPDATE_SCRIPT}"
+
+  cat > "${XRAY_AUTO_UPDATE_SERVICE}" <<EOF
+[Unit]
+Description=Update Xray-core through the official Xray installer
+Documentation=https://github.com/XTLS/Xray-install
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=${xray_binary}
+
+[Service]
+Type=oneshot
+ExecStart=${XRAY_AUTO_UPDATE_SCRIPT}
+EOF
+
+  cat > "${XRAY_AUTO_UPDATE_TIMER}" <<EOF
+[Unit]
+Description=Run Xray-core automatic update daily
+
+[Timer]
+OnCalendar=*-*-* ${AUTO_UPDATE_TIME}
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable --now xray-auto-update.timer >/dev/null
+  systemctl is-enabled --quiet xray-auto-update.timer || die "Failed to enable xray-auto-update.timer."
 }
 
 detect_public_ip() {
@@ -493,7 +615,7 @@ import sys
 import urllib.parse
 from pathlib import Path
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 DEFAULT_NODE_NAME = "vless-reality"
 DEFAULT_FINGERPRINT = "chrome"
 
@@ -810,6 +932,7 @@ Script version : ${SCRIPT_VERSION}
 Xray service   : $(systemctl is-active xray)
 Config file    : ${CONFIG_FILE}
 Artifact dir   : ${ARTIFACT_DIR}
+Auto update    : $([[ "${AUTO_UPDATE_XRAY}" == "1" ]] && printf 'xray-auto-update.timer at %s' "${AUTO_UPDATE_TIME}" || printf 'disabled')
 
 VLESS URL:
 ${VLESS_URL}
@@ -823,6 +946,21 @@ EOF
   fi
 }
 
+print_maintenance_summary() {
+  log "Xray maintenance complete"
+  cat <<EOF
+Script version : ${SCRIPT_VERSION}
+Xray service   : $(systemctl is-active xray 2>/dev/null || true)
+Xray binary    : ${XRAY_BIN}
+Config file    : ${CONFIG_FILE}
+Config action  : preserved existing config
+Auto update    : $([[ "${AUTO_UPDATE_XRAY}" == "1" ]] && printf 'xray-auto-update.timer at %s' "${AUTO_UPDATE_TIME}" || printf 'disabled')
+
+Existing Xray config was not replaced.
+Re-run with --force-overwrite to generate a new VLESS Reality config and export assets.
+EOF
+}
+
 main() {
   parse_args "$@"
   need_root
@@ -833,9 +971,15 @@ main() {
   install_dependencies
   ensure_required_commands
   install_xray
+  if [[ "${KEEP_EXISTING_CONFIG}" == "1" ]]; then
+    configure_xray_auto_update
+    print_maintenance_summary
+    return
+  fi
   detect_public_ip
   generate_reality_material
   write_xray_config
+  configure_xray_auto_update
   configure_firewall
   generate_assets
   print_summary
