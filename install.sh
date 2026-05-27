@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 SCRIPT_NAME="install.sh"
-SCRIPT_VERSION="1.3.3"
+SCRIPT_VERSION="1.3.4"
 XRAY_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 XRAY_AUTO_UPDATE_SCRIPT="/usr/local/sbin/xray-auto-update.sh"
 XRAY_AUTO_UPDATE_SERVICE="/etc/systemd/system/xray-auto-update.service"
@@ -625,7 +625,7 @@ import sys
 import urllib.parse
 from pathlib import Path
 
-VERSION = "1.3.3"
+VERSION = "1.3.4"
 DEFAULT_NODE_NAME = "vless-reality"
 DEFAULT_FINGERPRINT = "chrome"
 
@@ -814,12 +814,27 @@ rules:
   - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
   - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
   - RULE-SET,reject,REJECT
+  - DOMAIN-SUFFIX,api.openai.com,AI
+  - DOMAIN-SUFFIX,auth0.openai.com,AI
+  - DOMAIN-SUFFIX,auth.openai.com,AI
   - DOMAIN-SUFFIX,openai.com,AI
+  - DOMAIN-SUFFIX,openaiapi-site.azureedge.net,AI
+  - DOMAIN-SUFFIX,openaicom-api-bdcpf8c6d2e9atf6.z01.azurefd.net,AI
+  - DOMAIN-SUFFIX,openaicomproductionae4b.blob.core.windows.net,AI
+  - DOMAIN-SUFFIX,production-openaicom-storage.azureedge.net,AI
+  - DOMAIN-SUFFIX,openai.com.cdn.cloudflare.net,AI
   - DOMAIN-SUFFIX,chatgpt.com,AI
   - DOMAIN-SUFFIX,chat.com,AI
   - DOMAIN-SUFFIX,oaistatic.com,AI
   - DOMAIN-SUFFIX,oaiusercontent.com,AI
   - DOMAIN-SUFFIX,sora.com,AI
+  - DOMAIN-SUFFIX,chatgpt.livekit.cloud,AI
+  - DOMAIN-SUFFIX,host.livekit.cloud,AI
+  - DOMAIN-SUFFIX,turn.livekit.cloud,AI
+  - DOMAIN-SUFFIX,identrust.com,AI
+  - DOMAIN-SUFFIX,status.openai.com,AI
+  - DOMAIN-SUFFIX,browser-intake-datadoghq.com,AI
+  - DOMAIN-SUFFIX,o33249.ingest.sentry.io,AI
   - DOMAIN-SUFFIX,gemini.google.com,AI
   - DOMAIN-SUFFIX,gemini.google,AI
   - DOMAIN-SUFFIX,generativeai.google,AI
