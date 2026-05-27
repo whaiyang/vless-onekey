@@ -30,6 +30,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/i
 
 - `clashverge.yaml`
   给 `Clash Verge / Clash Mi / Karing` 导入的配置文件。
+  默认只监听本机，不开放局域网访问，并内置 `AI`、`Telegram`、`Streaming` 单节点策略组。
 - `shadowrocket-node.png`
   给 `Shadowrocket` 直接扫码导入的二维码。
 - `node.vless.txt`
