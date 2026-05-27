@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover - optional dependency
     qrcode = None
 
 
-VERSION = "1.3.2"
+VERSION = "1.3.3"
 DEFAULT_NODE_NAME = "vless-reality"
 DEFAULT_FINGERPRINT = "chrome"
 
@@ -36,12 +36,12 @@ def parse_args() -> argparse.Namespace:
         "--mixed-port",
         type=int,
         default=7890,
-        help="Mixed port written into clashverge.yaml. Default: 7890",
+        help="Mixed port written into the Clash YAML. Default: 7890",
     )
     parser.add_argument(
         "--controller",
         default="127.0.0.1:9090",
-        help="external-controller value for clashverge.yaml. Default: 127.0.0.1:9090",
+        help="external-controller value for the Clash YAML. Default: 127.0.0.1:9090",
     )
     parser.add_argument(
         "--skip-qr",
@@ -336,14 +336,13 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     normalized_vless = build_vless_url(node)
-    clashverge = build_clashverge_yaml(node, args.mixed_port, args.controller)
+    clash = build_clashverge_yaml(node, args.mixed_port, args.controller)
     shadowrocket = build_shadowrocket_conf(node)
     named_clash = clash_filename(node)
 
     files = {
         "node.vless.txt": normalized_vless,
-        "clashverge.yaml": clashverge,
-        named_clash: clashverge,
+        named_clash: clash,
         "shadowrocket.conf": shadowrocket,
         "metadata.json": json.dumps(node, ensure_ascii=False, indent=2) + "\n",
     }
@@ -356,7 +355,6 @@ def main() -> int:
 
     print(f"Generated assets in: {output_dir}")
     print(f"  - {output_dir / 'node.vless.txt'}")
-    print(f"  - {output_dir / 'clashverge.yaml'}")
     print(f"  - {output_dir / named_clash}")
     print(f"  - {output_dir / 'shadowrocket.conf'}")
     print(f"  - {output_dir / 'metadata.json'}")

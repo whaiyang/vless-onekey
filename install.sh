@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 SCRIPT_NAME="install.sh"
-SCRIPT_VERSION="1.3.2"
+SCRIPT_VERSION="1.3.3"
 XRAY_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 XRAY_AUTO_UPDATE_SCRIPT="/usr/local/sbin/xray-auto-update.sh"
 XRAY_AUTO_UPDATE_SERVICE="/etc/systemd/system/xray-auto-update.service"
@@ -76,7 +76,7 @@ Options:
   --skip-firewall           Do not change UFW rules
   --skip-packages           Skip apt package installation
   --skip-qr                 Do not generate Shadowrocket QR PNG
-  --skip-sz                 Do not auto-download clashverge.yaml with sz at the end
+  --skip-sz                 Do not auto-download the server-named Clash YAML with sz at the end
   -y, --yes                 Run non-interactively
   -V, --version             Show script version
   -h, --help                Show this help
@@ -625,7 +625,7 @@ import sys
 import urllib.parse
 from pathlib import Path
 
-VERSION = "1.3.2"
+VERSION = "1.3.3"
 DEFAULT_NODE_NAME = "vless-reality"
 DEFAULT_FINGERPRINT = "chrome"
 
@@ -883,12 +883,11 @@ def main() -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    clashverge = build_clashverge_yaml(node, args.mixed_port, args.controller)
+    clash = build_clashverge_yaml(node, args.mixed_port, args.controller)
     named_clash = clash_filename(node)
 
     (output_dir / "node.vless.txt").write_text(args.vless_url + "\n", encoding="utf-8")
-    (output_dir / "clashverge.yaml").write_text(clashverge, encoding="utf-8")
-    (output_dir / named_clash).write_text(clashverge, encoding="utf-8")
+    (output_dir / named_clash).write_text(clash, encoding="utf-8")
     (output_dir / "shadowrocket.conf").write_text(
         build_shadowrocket_conf(node), encoding="utf-8"
     )
@@ -982,7 +981,6 @@ Short ID: ${SHORT_ID}
 
 Generated files:
   ${ARTIFACT_DIR}/node.vless.txt
-  ${ARTIFACT_DIR}/clashverge.yaml
   ${ARTIFACT_DIR}/${PUBLIC_IP}.yaml
   ${ARTIFACT_DIR}/shadowrocket.conf
   ${ARTIFACT_DIR}/metadata.json
@@ -999,7 +997,6 @@ EOF
 Download with sz:
   sz ${ARTIFACT_DIR}/node.vless.txt
   sz ${ARTIFACT_DIR}/${PUBLIC_IP}.yaml
-  sz ${ARTIFACT_DIR}/clashverge.yaml
   sz ${ARTIFACT_DIR}/shadowrocket.conf
   sz ${ARTIFACT_DIR}/metadata.json
   sz ${ARTIFACT_DIR}/*
@@ -1007,8 +1004,7 @@ Download with sz:
 Notes:
   - sz requires a ZMODEM-capable terminal such as Xshell, SecureCRT, or MobaXterm.
   - shadowrocket-node.png is a VLESS QR code for direct Shadowrocket scanning.
-  - ${PUBLIC_IP}.yaml is the preferred Clash import file, so Clash Verge displays the server address as the profile name.
-  - clashverge.yaml is intended for Clash Verge, Clash Mi, or Karing.
+  - ${PUBLIC_IP}.yaml is intended for Clash Verge, Clash Mi, or Karing, and Clash Verge displays the server address as the profile name.
   - install.sh automatically runs: sz ${ARTIFACT_DIR}/${PUBLIC_IP}.yaml
 EOF
 }
@@ -1037,7 +1033,6 @@ EOF
 
 send_clashverge_yaml() {
   local target="${ARTIFACT_DIR}/${PUBLIC_IP}.yaml"
-  local fallback="${ARTIFACT_DIR}/clashverge.yaml"
 
   if [[ "${SKIP_SZ}" == "1" ]]; then
     log "Skipping automatic Clash YAML download by request"
@@ -1045,12 +1040,8 @@ send_clashverge_yaml() {
   fi
 
   if [[ ! -f "${target}" ]]; then
-    if [[ -f "${fallback}" ]]; then
-      target="${fallback}"
-    else
-      warn "Clash YAML was not found at ${target}; skipping automatic sz download."
-      return
-    fi
+    warn "Clash YAML was not found at ${target}; skipping automatic sz download."
+    return
   fi
 
   if ! command_exists sz; then

@@ -28,11 +28,10 @@ bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/i
 /root/vless-export
 ```
 
-- `clashverge.yaml`
+- `<服务器IP>.yaml`
   给 `Clash Verge / Clash Mi / Karing` 导入的配置文件。
   默认只监听本机，不开放局域网访问，并内置 `AI`、`Telegram`、`Streaming` 单节点策略组。
-- `<服务器IP>.yaml`
-  与 `clashverge.yaml` 内容相同。优先导入这个文件，Clash Verge 的配置卡片会显示服务器 IP，而不是 `clashverge.yaml`。
+  Clash Verge 的配置卡片会显示服务器 IP，而不是通用文件名。
 - `shadowrocket-node.png`
   给 `Shadowrocket` 直接扫码导入的二维码。
 - `node.vless.txt`
@@ -48,23 +47,13 @@ bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/i
 
 脚本会安装 `lrzsz`，执行完成后默认自动运行：
 
-```bash
-sz /root/vless-export/clashverge.yaml
-```
-
 也可以手动用 `sz` 下载：
 
 ```bash
 sz /root/vless-export/*
 ```
 
-只下载 `clashverge.yaml`：
-
-```bash
-sz /root/vless-export/clashverge.yaml
-```
-
-优先下载并导入 IP 命名的配置文件：
+只下载并导入 IP 命名的配置文件：
 
 ```bash
 sz /root/vless-export/<服务器IP>.yaml
@@ -89,7 +78,7 @@ sz /root/vless-export/shadowrocket-node.png
 - 默认会随机选择一个常见国内 HTTPS 域名作为 `SNI`，也可以手动传 `--sni` 指定。
 - 会自动优先使用公网 IPv4；如果服务器只有 IPv6，会自动回落到 IPv6 并导出对应配置。
 - `shadowrocket-node.png` 适合直接给 `Shadowrocket` 扫码。
-- `clashverge.yaml` 适合 `Clash Verge / Clash Mi / Karing` 导入。
+- `<服务器IP>.yaml` 适合 `Clash Verge / Clash Mi / Karing` 导入。
 
 查看自动更新状态：
 
