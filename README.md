@@ -31,6 +31,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/i
 - `clashverge.yaml`
   给 `Clash Verge / Clash Mi / Karing` 导入的配置文件。
   默认只监听本机，不开放局域网访问，并内置 `AI`、`Telegram`、`Streaming` 单节点策略组。
+- `<服务器IP>.yaml`
+  与 `clashverge.yaml` 内容相同。优先导入这个文件，Clash Verge 的配置卡片会显示服务器 IP，而不是 `clashverge.yaml`。
 - `shadowrocket-node.png`
   给 `Shadowrocket` 直接扫码导入的二维码。
 - `node.vless.txt`
@@ -62,6 +64,12 @@ sz /root/vless-export/*
 sz /root/vless-export/clashverge.yaml
 ```
 
+优先下载并导入 IP 命名的配置文件：
+
+```bash
+sz /root/vless-export/<服务器IP>.yaml
+```
+
 只下载二维码：
 
 ```bash
@@ -75,7 +83,7 @@ sz /root/vless-export/shadowrocket-node.png
 - 如果需要保留服务器上已有的 `xray` 二进制，可以传 `--skip-xray-upgrade`。
 - 默认启用每日自动更新，默认时间为服务器本地时间 `03:30:00`，也可以用 `--auto-update-time HH:MM` 指定。
 - 如果不想启用自动更新，可以传 `--skip-auto-update-xray`。
-- 默认安装结束会自动执行 `sz /root/vless-export/clashverge.yaml`，如果终端不支持 ZMODEM，可以传 `--skip-sz`。
+- 默认安装结束会自动执行 `sz /root/vless-export/<服务器IP>.yaml`，如果终端不支持 ZMODEM，可以传 `--skip-sz`。
 - 自动更新由 `systemd` 管理：`xray-auto-update.timer` 和 `xray-auto-update.service`。
 - 可以传 `--xray-beta` 使用 Xray 最新预发布版本；如果同时启用自动更新，后续自动更新也会跟随预发布通道。
 - 默认会随机选择一个常见国内 HTTPS 域名作为 `SNI`，也可以手动传 `--sni` 指定。

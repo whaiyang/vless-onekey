@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover - optional dependency
     qrcode = None
 
 
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 DEFAULT_NODE_NAME = "vless-reality"
 DEFAULT_FINGERPRINT = "chrome"
 
@@ -318,6 +318,10 @@ def slugify(value: str) -> str:
     return cleaned or "node"
 
 
+def clash_filename(node: dict[str, str | int]) -> str:
+    return f"{slugify(str(node['server']))}.yaml"
+
+
 def write_qr_png(data: str, target: Path) -> None:
     if qrcode is None:
         return
@@ -334,11 +338,12 @@ def main() -> int:
     normalized_vless = build_vless_url(node)
     clashverge = build_clashverge_yaml(node, args.mixed_port, args.controller)
     shadowrocket = build_shadowrocket_conf(node)
-    slug = slugify(str(node["name"]))
+    named_clash = clash_filename(node)
 
     files = {
         "node.vless.txt": normalized_vless,
         "clashverge.yaml": clashverge,
+        named_clash: clashverge,
         "shadowrocket.conf": shadowrocket,
         "metadata.json": json.dumps(node, ensure_ascii=False, indent=2) + "\n",
     }
@@ -352,6 +357,7 @@ def main() -> int:
     print(f"Generated assets in: {output_dir}")
     print(f"  - {output_dir / 'node.vless.txt'}")
     print(f"  - {output_dir / 'clashverge.yaml'}")
+    print(f"  - {output_dir / named_clash}")
     print(f"  - {output_dir / 'shadowrocket.conf'}")
     print(f"  - {output_dir / 'metadata.json'}")
     if not args.skip_qr and qrcode is not None:
