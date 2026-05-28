@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 SCRIPT_NAME="install.sh"
-SCRIPT_VERSION="1.3.6"
+SCRIPT_VERSION="1.3.7"
 XRAY_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 XRAY_AUTO_UPDATE_SCRIPT="/usr/local/sbin/xray-auto-update.sh"
 XRAY_AUTO_UPDATE_SERVICE="/etc/systemd/system/xray-auto-update.service"
@@ -626,7 +626,7 @@ import sys
 import urllib.parse
 from pathlib import Path
 
-VERSION = "1.3.6"
+VERSION = "1.3.7"
 DEFAULT_NODE_NAME = "vless-reality"
 DEFAULT_FINGERPRINT = "chrome"
 
@@ -757,13 +757,6 @@ dns:
     - https://8.8.8.8/dns-query
 
 rule-providers:
-  reject:
-    type: http
-    behavior: domain
-    url: "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/reject.txt"
-    path: ./ruleset/reject.yaml
-    interval: 86400
-
   proxy:
     type: http
     behavior: domain
@@ -833,7 +826,6 @@ rules:
   - IP-CIDR6,::1/128,DIRECT,no-resolve
   - IP-CIDR6,fc00::/7,DIRECT,no-resolve
   - IP-CIDR6,fe80::/10,DIRECT,no-resolve
-  - RULE-SET,reject,REJECT
   - DOMAIN-SUFFIX,api.openai.com,AI
   - DOMAIN-SUFFIX,auth0.openai.com,AI
   - DOMAIN-SUFFIX,auth.openai.com,AI
