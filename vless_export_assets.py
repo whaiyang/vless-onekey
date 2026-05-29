@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover - optional dependency
     qrcode = None
 
 
-VERSION = "1.3.7"
+VERSION = "1.3.8"
 DEFAULT_NODE_NAME = "vless-reality"
 DEFAULT_FINGERPRINT = "chrome"
 
@@ -257,6 +257,7 @@ proxy-groups:
 
 rules:
 {server_direct_rule}
+  - DOMAIN,api.freemodel.dev,DIRECT
   - DOMAIN-SUFFIX,local,DIRECT
   - DOMAIN-SUFFIX,localhost,DIRECT
   - DOMAIN-SUFFIX,lan,DIRECT
