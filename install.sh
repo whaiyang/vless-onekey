@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 SCRIPT_NAME="install.sh"
-SCRIPT_VERSION="1.3.8"
+SCRIPT_VERSION="1.3.9"
 XRAY_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 XRAY_AUTO_UPDATE_SCRIPT="/usr/local/sbin/xray-auto-update.sh"
 XRAY_AUTO_UPDATE_SERVICE="/etc/systemd/system/xray-auto-update.service"
@@ -626,7 +626,7 @@ import sys
 import urllib.parse
 from pathlib import Path
 
-VERSION = "1.3.8"
+VERSION = "1.3.9"
 DEFAULT_NODE_NAME = "vless-reality"
 DEFAULT_FINGERPRINT = "chrome"
 
@@ -813,7 +813,7 @@ proxy-groups:
 
 rules:
 {server_direct_rule}
-  - DOMAIN,api.freemodel.dev,DIRECT
+  - DOMAIN-SUFFIX,freemodel.dev,DIRECT
   - DOMAIN-SUFFIX,local,DIRECT
   - DOMAIN-SUFFIX,localhost,DIRECT
   - DOMAIN-SUFFIX,lan,DIRECT
