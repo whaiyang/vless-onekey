@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover - optional dependency
     qrcode = None
 
 
-VERSION = "1.3.9"
+VERSION = "1.4.0"
 DEFAULT_NODE_NAME = "vless-reality"
 DEFAULT_FINGERPRINT = "chrome"
 
@@ -166,8 +166,10 @@ tun:
   stack: system
   dns-hijack:
     - any:53
+    - tcp://any:53
   auto-route: true
   auto-detect-interface: true
+  strict-route: true
 
 dns:
   enable: true

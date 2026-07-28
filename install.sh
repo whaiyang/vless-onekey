@@ -1,19 +1,23 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 077
 
 SCRIPT_NAME="install.sh"
-SCRIPT_VERSION="1.3.9"
-XRAY_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
+SCRIPT_VERSION="1.4.0"
+XRAY_INSTALLER_COMMIT="e741a4f56d368afbb9e5be3361b40c4552d3710d"
+XRAY_INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/${XRAY_INSTALLER_COMMIT}/install-release.sh"
 XRAY_AUTO_UPDATE_SCRIPT="/usr/local/sbin/xray-auto-update.sh"
 XRAY_AUTO_UPDATE_SERVICE="/etc/systemd/system/xray-auto-update.service"
 XRAY_AUTO_UPDATE_TIMER="/etc/systemd/system/xray-auto-update.timer"
+XRAY_HARDENING_DROP_IN="/etc/systemd/system/xray.service.d/20-vless-onekey-hardening.conf"
 
-PORT=""
+PORT="443"
 SNI=""
 DEST_HOST=""
 DEST_PORT="443"
 NODE_NAME=""
 CLIENT_FINGERPRINT="chrome"
+MAX_TIME_DIFF_MS="60000"
 ARTIFACT_DIR="/root/vless-export"
 PUBLIC_IP=""
 PUBLIC_IP_FAMILY=""
@@ -26,28 +30,25 @@ SKIP_QR="0"
 SKIP_SZ="0"
 SKIP_XRAY_UPGRADE="0"
 XRAY_BETA="0"
-AUTO_UPDATE_XRAY="1"
+AUTO_UPDATE_XRAY="0"
 AUTO_UPDATE_TIME="03:30:00"
+ALLOW_NON_443="0"
 
 OS_ID=""
 OS_VERSION_ID=""
 CONFIG_FILE="/usr/local/etc/xray/config.json"
 CONFIG_BACKUP_FILE=""
 CONFIG_WAS_BACKED_UP="0"
+CONFIG_REPLACED="0"
+HARDENING_BACKUP_FILE=""
+HARDENING_CHANGED="0"
 KEEP_EXISTING_CONFIG="0"
 XRAY_BIN=""
+XRAY_RUN_USER="xray"
+XRAY_RUN_GROUP=""
 XRAY_LISTEN="0.0.0.0"
 CLASH_YAML_NAME=""
-DEFAULT_SNI_POOL=(
-  "www.qq.com"
-  "www.taobao.com"
-  "www.jd.com"
-  "www.bilibili.com"
-  "www.zhihu.com"
-  "www.sina.com.cn"
-  "www.163.com"
-  "www.douban.com"
-)
+OLD_XRAY_PORT=""
 
 usage() {
   cat <<EOF
@@ -59,10 +60,12 @@ Usage:
   bash ${SCRIPT_NAME} [options]
 
 Options:
-  --port PORT               Listen port for VLESS Reality. Default: random 20000-40000
-  --sni HOST                SNI and Reality serverNames. Default: random common China HTTPS domain
+  --port PORT               Listen port for VLESS Reality. Default: 443
+  --sni HOST                Required SNI and Reality serverNames; choose a verified same-ASN TLS 1.3 site
   --dest-host HOST          Reality dest host. Default: same as --sni
   --dest-port PORT          Reality dest port. Default: ${DEST_PORT}
+  --max-time-diff-ms MS     Reject stale Reality handshakes beyond this clock skew. Default: ${MAX_TIME_DIFF_MS}
+  --allow-non-443           Explicitly allow a non-443 listen or target port
   --node-name NAME          Exported node name. Default: server hostname
   --fingerprint VALUE       Client fingerprint for exports. Default: ${CLIENT_FINGERPRINT}
   --artifact-dir PATH       Directory for generated files. Default: ${ARTIFACT_DIR}
@@ -71,8 +74,8 @@ Options:
   --upgrade-xray            Update existing Xray to latest stable release. This is the default
   --skip-xray-upgrade       Keep an existing Xray binary instead of checking for updates
   --xray-beta               Install/update latest Xray pre-release instead of stable release
-  --auto-update-xray        Enable a daily systemd timer to update Xray automatically. This is the default
-  --skip-auto-update-xray   Do not enable the Xray automatic update timer
+  --auto-update-xray        Enable a daily systemd timer to update Xray automatically
+  --skip-auto-update-xray   Do not enable the Xray automatic update timer. This is the default
   --auto-update-time TIME   Daily auto-update time in HH:MM or HH:MM:SS. Default: ${AUTO_UPDATE_TIME}
   --skip-firewall           Do not change UFW rules
   --skip-packages           Skip apt package installation
@@ -83,11 +86,11 @@ Options:
   -h, --help                Show this help
 
 Examples:
-  bash ${SCRIPT_NAME} -y
-  bash ${SCRIPT_NAME} -y --node-name my-vps --force-overwrite
+  bash ${SCRIPT_NAME} -y --sni www.example.com
+  bash ${SCRIPT_NAME} -y --sni www.example.com --node-name my-vps --force-overwrite
 
 GitHub Raw example:
-  bash <(curl -fsSL https://raw.githubusercontent.com/<you>/<repo>/main/${SCRIPT_NAME}) -y
+  bash <(curl -fsSL https://raw.githubusercontent.com/<you>/<repo>/main/${SCRIPT_NAME}) -y --sni www.example.com
 EOF
 }
 
@@ -106,16 +109,32 @@ die() {
 
 cleanup_on_error() {
   local exit_code="$?"
+  local restart_xray="0"
   if [[ "${exit_code}" -eq 0 ]]; then
     return
   fi
 
+  set +e
   warn "Installer exited with code ${exit_code}."
-  if [[ "${CONFIG_WAS_BACKED_UP}" == "1" && -f "${CONFIG_BACKUP_FILE}" ]]; then
-    warn "Existing Xray config was backed up to: ${CONFIG_BACKUP_FILE}"
-    warn "If needed, restore it manually with:"
-    warn "  cp '${CONFIG_BACKUP_FILE}' '${CONFIG_FILE}' && systemctl restart xray"
+  if [[ "${CONFIG_REPLACED}" == "1" && "${CONFIG_WAS_BACKED_UP}" == "1" && -f "${CONFIG_BACKUP_FILE}" ]]; then
+    cp "${CONFIG_BACKUP_FILE}" "${CONFIG_FILE}"
+    warn "Restored the previous Xray config from: ${CONFIG_BACKUP_FILE}"
+    restart_xray="1"
   fi
+  if [[ "${HARDENING_CHANGED}" == "1" ]]; then
+    if [[ -n "${HARDENING_BACKUP_FILE}" && -f "${HARDENING_BACKUP_FILE}" ]]; then
+      cp "${HARDENING_BACKUP_FILE}" "${XRAY_HARDENING_DROP_IN}"
+    else
+      rm -f "${XRAY_HARDENING_DROP_IN}"
+    fi
+    systemctl daemon-reload
+    warn "Restored the previous Xray systemd hardening configuration."
+    restart_xray="1"
+  fi
+  if [[ "${restart_xray}" == "1" ]]; then
+    systemctl restart xray
+  fi
+  exit "${exit_code}"
 }
 
 trap cleanup_on_error EXIT
@@ -161,6 +180,14 @@ parse_args() {
       --dest-port)
         DEST_PORT="${2:-}"
         shift 2
+        ;;
+      --max-time-diff-ms)
+        MAX_TIME_DIFF_MS="${2:-}"
+        shift 2
+        ;;
+      --allow-non-443)
+        ALLOW_NON_443="1"
+        shift
         ;;
       --node-name)
         NODE_NAME="${2:-}"
@@ -259,17 +286,21 @@ detect_os() {
 }
 
 validate_args() {
+  [[ -n "${SNI}" ]] || die "--sni is required. Choose a verified same-ASN TLS 1.3 target."
   [[ "${SNI}" =~ ^[A-Za-z0-9.-]+$ ]] || die "Invalid --sni value: ${SNI}"
   [[ -z "${DEST_HOST}" || "${DEST_HOST}" =~ ^[A-Za-z0-9.-]+$ ]] || die "Invalid --dest-host value: ${DEST_HOST}"
   [[ "${CLIENT_FINGERPRINT}" =~ ^[A-Za-z0-9._-]+$ ]] || die "Invalid --fingerprint value: ${CLIENT_FINGERPRINT}"
 
-  if [[ -n "${PORT}" ]]; then
-    [[ "${PORT}" =~ ^[0-9]+$ ]] || die "--port must be a number"
-    (( PORT >= 1 && PORT <= 65535 )) || die "--port must be between 1 and 65535"
-  fi
+  [[ "${PORT}" =~ ^[0-9]+$ ]] || die "--port must be a number"
+  (( PORT >= 1 && PORT <= 65535 )) || die "--port must be between 1 and 65535"
 
   [[ "${DEST_PORT}" =~ ^[0-9]+$ ]] || die "--dest-port must be a number"
   (( DEST_PORT >= 1 && DEST_PORT <= 65535 )) || die "--dest-port must be between 1 and 65535"
+  [[ "${MAX_TIME_DIFF_MS}" =~ ^[0-9]+$ ]] || die "--max-time-diff-ms must be a non-negative number"
+
+  if [[ "${ALLOW_NON_443}" != "1" ]] && { [[ "${PORT}" != "443" ]] || [[ "${DEST_PORT}" != "443" ]]; }; then
+    die "REALITY should use port 443. Re-run with --allow-non-443 only after reviewing the blocking risk."
+  fi
 
   [[ "${AUTO_UPDATE_TIME}" =~ ^([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$ ]] || die "--auto-update-time must be HH:MM or HH:MM:SS"
   if [[ "${AUTO_UPDATE_TIME}" =~ ^[0-9]{2}:[0-9]{2}$ ]]; then
@@ -278,14 +309,6 @@ validate_args() {
 }
 
 ensure_defaults() {
-  if [[ -z "${PORT}" ]]; then
-    PORT="$(shuf -i 20000-40000 -n 1)"
-  fi
-  if [[ -z "${SNI}" ]]; then
-    local index
-    index="$(shuf -i 0-$((${#DEFAULT_SNI_POOL[@]} - 1)) -n 1)"
-    SNI="${DEFAULT_SNI_POOL[${index}]}"
-  fi
   if [[ -z "${DEST_HOST}" ]]; then
     DEST_HOST="${SNI}"
   fi
@@ -313,7 +336,9 @@ SNI            : ${SNI}
 Reality dest   : ${DEST_HOST}:${DEST_PORT}
 Node name      : ${NODE_NAME}
 Fingerprint    : ${CLIENT_FINGERPRINT}
+Max time diff  : ${MAX_TIME_DIFF_MS} ms
 Artifact dir   : ${ARTIFACT_DIR}
+Xray run user  : ${XRAY_RUN_USER}
 Xray channel   : $([[ "${XRAY_BETA}" == "1" ]] && printf 'pre-release' || printf 'stable')
 Upgrade Xray   : $([[ "${SKIP_XRAY_UPGRADE}" == "1" ]] && printf 'no' || printf 'yes')
 Auto update    : ${AUTO_UPDATE_XRAY}
@@ -362,6 +387,7 @@ install_dependencies() {
     curl \
     lrzsz \
     openssl \
+    passwd \
     python3 \
     qrencode \
     ufw \
@@ -370,7 +396,7 @@ install_dependencies() {
 }
 
 ensure_required_commands() {
-  local required=(curl openssl python3 shuf awk sed)
+  local required=(curl openssl python3 awk sed ss timeout useradd)
   local missing=()
   local cmd
   for cmd in "${required[@]}"; do
@@ -384,8 +410,22 @@ ensure_required_commands() {
   fi
 }
 
+ensure_xray_run_user() {
+  if ! id "${XRAY_RUN_USER}" >/dev/null 2>&1; then
+    useradd --system --user-group --create-home --home-dir /var/lib/xray --shell /usr/sbin/nologin "${XRAY_RUN_USER}"
+  fi
+  XRAY_RUN_GROUP="$(id -gn "${XRAY_RUN_USER}")"
+  install -d -m 750 -o "${XRAY_RUN_USER}" -g "${XRAY_RUN_GROUP}" /var/lib/xray
+  if [[ -f "${CONFIG_FILE}" ]]; then
+    chown "root:${XRAY_RUN_GROUP}" "$(dirname "${CONFIG_FILE}")" "${CONFIG_FILE}"
+    chmod 750 "$(dirname "${CONFIG_FILE}")"
+    chmod 640 "${CONFIG_FILE}"
+  fi
+}
+
 install_xray() {
-  local installer_args=(install -u root)
+  local installer_args=(install -u "${XRAY_RUN_USER}")
+  local current_service_user=""
   if [[ "${XRAY_BETA}" == "1" ]]; then
     installer_args+=(--beta)
   fi
@@ -396,6 +436,12 @@ install_xray() {
     if [[ "${SKIP_XRAY_UPGRADE}" == "1" ]]; then
       log "Skipping Xray update check by request"
       return
+    fi
+    current_service_user="$(systemctl show xray -p User --value 2>/dev/null || true)"
+    if [[ -n "${current_service_user}" && "${current_service_user}" != "${XRAY_RUN_USER}" ]]; then
+      [[ "${XRAY_BETA}" != "1" ]] || die "Cannot combine a service-user migration with --xray-beta. Install stable first."
+      installer_args+=(--reinstall)
+      log "Reinstalling Xray to migrate the service from ${current_service_user} to ${XRAY_RUN_USER}"
     fi
     log "Checking/updating Xray via the official installer"
   else
@@ -409,8 +455,47 @@ install_xray() {
   [[ -x "${XRAY_BIN}" ]] || die "Xray installation completed but xray binary was not found."
 }
 
+configure_xray_service_hardening() {
+  mkdir -p "$(dirname "${XRAY_HARDENING_DROP_IN}")"
+  if [[ -f "${XRAY_HARDENING_DROP_IN}" ]]; then
+    HARDENING_BACKUP_FILE="${XRAY_HARDENING_DROP_IN}.bak.$(date +%Y%m%d%H%M%S)"
+    cp -p "${XRAY_HARDENING_DROP_IN}" "${HARDENING_BACKUP_FILE}"
+    chmod 600 "${HARDENING_BACKUP_FILE}"
+  fi
+  cat > "${XRAY_HARDENING_DROP_IN}" <<EOF
+[Service]
+User=${XRAY_RUN_USER}
+Group=${XRAY_RUN_GROUP}
+CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+UMask=0077
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+SystemCallArchitectures=native
+EOF
+  HARDENING_CHANGED="1"
+  chmod 644 "${XRAY_HARDENING_DROP_IN}"
+  systemctl daemon-reload
+}
+
 configure_xray_auto_update() {
   if [[ "${AUTO_UPDATE_XRAY}" != "1" ]]; then
+    if command_exists systemctl; then
+      systemctl disable --now xray-auto-update.timer >/dev/null 2>&1 || true
+    fi
     return
   fi
 
@@ -431,7 +516,7 @@ set -Eeuo pipefail
 
 XRAY_INSTALLER_URL="${XRAY_INSTALLER_URL}"
 
-bash -c "\$(curl -fsSL "\${XRAY_INSTALLER_URL}")" @ install -u root --no-update-service${beta_arg}
+bash -c "\$(curl -fsSL "\${XRAY_INSTALLER_URL}")" @ install -u "${XRAY_RUN_USER}" --no-update-service${beta_arg}
 EOF
   chmod 700 "${XRAY_AUTO_UPDATE_SCRIPT}"
 
@@ -464,6 +549,40 @@ EOF
   systemctl daemon-reload
   systemctl enable --now xray-auto-update.timer >/dev/null
   systemctl is-enabled --quiet xray-auto-update.timer || die "Failed to enable xray-auto-update.timer."
+}
+
+validate_reality_target() {
+  local tls_output
+  log "Validating Reality target TLS 1.3 and certificate"
+  tls_output="$(
+    timeout 20 openssl s_client \
+      -connect "${DEST_HOST}:${DEST_PORT}" \
+      -servername "${SNI}" \
+      -verify_hostname "${SNI}" \
+      -tls1_3 </dev/null 2>&1
+  )" || die "Unable to complete a TLS 1.3 handshake with ${DEST_HOST}:${DEST_PORT}."
+
+  grep -q "Verify return code: 0 (ok)" <<<"${tls_output}" || die "Reality target certificate does not verify for SNI ${SNI}."
+  log "Reality target validation passed: ${SNI} via ${DEST_HOST}:${DEST_PORT}"
+}
+
+check_listen_port_available() {
+  local listeners
+  listeners="$(ss -H -ltnp "sport = :${PORT}" 2>/dev/null || true)"
+  if [[ -n "${listeners}" ]] && ! grep -q 'users:(("xray"' <<<"${listeners}"; then
+    die "TCP port ${PORT} is already used by another process: ${listeners}"
+  fi
+}
+
+wait_for_xray_listener() {
+  local attempt
+  for attempt in {1..40}; do
+    if ss -H -ltnp "sport = :${PORT}" 2>/dev/null | grep -q 'users:(("xray"'; then
+      return
+    fi
+    sleep 0.25
+  done
+  die "Xray is active but is not listening on TCP port ${PORT}."
 }
 
 detect_public_ip() {
@@ -520,8 +639,22 @@ backup_existing_config() {
   mkdir -p "${config_dir}"
 
   if [[ -f "${CONFIG_FILE}" ]]; then
+    OLD_XRAY_PORT="$(
+      python3 - "${CONFIG_FILE}" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    config = json.load(fh)
+for inbound in config.get("inbounds", []):
+    if inbound.get("protocol") == "vless" and isinstance(inbound.get("port"), int):
+        print(inbound["port"])
+        break
+PY
+    )"
     CONFIG_BACKUP_FILE="${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
-    cp "${CONFIG_FILE}" "${CONFIG_BACKUP_FILE}"
+    cp -p "${CONFIG_FILE}" "${CONFIG_BACKUP_FILE}"
+    chmod 600 "${CONFIG_BACKUP_FILE}"
     CONFIG_WAS_BACKED_UP="1"
     log "Existing Xray config backed up to ${CONFIG_BACKUP_FILE}"
   fi
@@ -545,6 +678,7 @@ write_xray_config() {
         "clients": [
           {
             "id": "${UUID}",
+            "email": "default@vless.local",
             "flow": "xtls-rprx-vision"
           }
         ],
@@ -555,24 +689,17 @@ write_xray_config() {
         "security": "reality",
         "realitySettings": {
           "show": false,
-          "dest": "${DEST_HOST}:${DEST_PORT}",
+          "target": "${DEST_HOST}:${DEST_PORT}",
           "xver": 0,
           "serverNames": [
             "${SNI}"
           ],
           "privateKey": "${PRIVATE_KEY}",
+          "maxTimeDiff": ${MAX_TIME_DIFF_MS},
           "shortIds": [
             "${SHORT_ID}"
           ]
         }
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": [
-          "http",
-          "tls",
-          "quic"
-        ]
       }
     }
   ],
@@ -585,14 +712,43 @@ write_xray_config() {
       "protocol": "blackhole",
       "tag": "block"
     }
-  ]
+  ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      {
+        "type": "field",
+        "ip": [
+          "geoip:private",
+          "169.254.169.254/32",
+          "fe80::/10"
+        ],
+        "outboundTag": "block"
+      }
+    ]
+  }
 }
 EOF
 
+  CONFIG_REPLACED="1"
+  chown "root:${XRAY_RUN_GROUP}" "$(dirname "${CONFIG_FILE}")" "${CONFIG_FILE}"
+  chmod 750 "$(dirname "${CONFIG_FILE}")"
+  chmod 640 "${CONFIG_FILE}"
   "${XRAY_BIN}" run -test -config "${CONFIG_FILE}" >/dev/null
   systemctl enable xray
   systemctl restart xray
   systemctl is-active --quiet xray || die "Xray failed to start."
+  wait_for_xray_listener
+}
+
+secure_existing_xray_config() {
+  [[ -f "${CONFIG_FILE}" ]] || return
+  chown "root:${XRAY_RUN_GROUP}" "$(dirname "${CONFIG_FILE}")" "${CONFIG_FILE}"
+  chmod 750 "$(dirname "${CONFIG_FILE}")"
+  chmod 640 "${CONFIG_FILE}"
+  "${XRAY_BIN}" run -test -config "${CONFIG_FILE}" >/dev/null
+  systemctl restart xray
+  systemctl is-active --quiet xray || die "Xray failed after switching to the unprivileged service user."
 }
 
 configure_firewall() {
@@ -607,9 +763,21 @@ configure_firewall() {
   fi
 
   log "Opening firewall ports"
-  ufw allow OpenSSH >/dev/null 2>&1 || ufw allow 22/tcp >/dev/null 2>&1 || true
-  ufw allow "${PORT}/tcp" >/dev/null 2>&1 || true
-  ufw --force enable >/dev/null 2>&1 || true
+  ufw --force delete allow OpenSSH >/dev/null 2>&1 || true
+  ufw --force delete allow 22/tcp >/dev/null 2>&1 || true
+  ufw limit OpenSSH >/dev/null 2>&1 || ufw limit 22/tcp >/dev/null 2>&1 || die "Failed to protect the SSH firewall rule."
+  ufw allow "${PORT}/tcp" >/dev/null 2>&1 || die "Failed to open TCP port ${PORT} in UFW."
+  ufw --force enable >/dev/null 2>&1 || die "Failed to enable UFW."
+  ufw status | grep -Eq "^${PORT}/tcp[[:space:]]+ALLOW" || die "UFW does not show TCP port ${PORT} as allowed."
+}
+
+remove_old_firewall_rule() {
+  if [[ "${SKIP_FIREWALL}" == "1" || -z "${OLD_XRAY_PORT}" || "${OLD_XRAY_PORT}" == "${PORT}" ]]; then
+    return
+  fi
+  if [[ "${OLD_XRAY_PORT}" =~ ^[0-9]+$ ]]; then
+    ufw --force delete allow "${OLD_XRAY_PORT}/tcp" >/dev/null 2>&1 || warn "Could not remove the old UFW rule for TCP ${OLD_XRAY_PORT}."
+  fi
 }
 
 write_export_tool() {
@@ -626,7 +794,7 @@ import sys
 import urllib.parse
 from pathlib import Path
 
-VERSION = "1.3.9"
+VERSION = "1.4.0"
 DEFAULT_NODE_NAME = "vless-reality"
 DEFAULT_FINGERPRINT = "chrome"
 
@@ -722,8 +890,10 @@ tun:
   stack: system
   dns-hijack:
     - any:53
+    - tcp://any:53
   auto-route: true
   auto-detect-interface: true
+  strict-route: true
 
 dns:
   enable: true
@@ -988,6 +1158,7 @@ PY
 generate_assets() {
   log "Generating export files"
   mkdir -p "${ARTIFACT_DIR}"
+  chmod 700 "${ARTIFACT_DIR}"
   build_vless_url
   write_export_tool
   python3 "${ARTIFACT_DIR}/vless_export_assets.py" \
@@ -1008,6 +1179,9 @@ PY
   if [[ "${SKIP_QR}" != "1" ]] && command_exists qrencode; then
     qrencode -o "${ARTIFACT_DIR}/shadowrocket-node.png" "${VLESS_URL}"
   fi
+
+  chmod 700 "${ARTIFACT_DIR}/vless_export_assets.py"
+  find "${ARTIFACT_DIR}" -maxdepth 1 -type f ! -name vless_export_assets.py -exec chmod 600 {} +
 
   cat > "${ARTIFACT_DIR}/README.txt" <<EOF
 ${SCRIPT_NAME} v${SCRIPT_VERSION}
@@ -1063,8 +1237,7 @@ Artifact dir   : ${ARTIFACT_DIR}
 Auto update    : $([[ "${AUTO_UPDATE_XRAY}" == "1" ]] && printf 'xray-auto-update.timer at %s' "${AUTO_UPDATE_TIME}" || printf 'disabled')
 Auto sz Clash  : $([[ "${SKIP_SZ}" == "1" ]] && printf 'disabled' || printf 'enabled')
 
-VLESS URL:
-${VLESS_URL}
+VLESS URL file : ${ARTIFACT_DIR}/node.vless.txt
 
 Quick download:
   sz ${ARTIFACT_DIR}/*
@@ -1144,21 +1317,30 @@ main() {
   confirm_plan
   install_dependencies
   ensure_required_commands
+  ensure_xray_run_user
   install_xray
+  configure_xray_service_hardening
   if [[ "${KEEP_EXISTING_CONFIG}" == "1" ]]; then
+    secure_existing_xray_config
     configure_xray_auto_update
     print_maintenance_summary
     send_clashverge_yaml
+    HARDENING_CHANGED="0"
     return
   fi
   detect_public_ip
+  validate_reality_target
+  check_listen_port_available
   generate_reality_material
+  configure_firewall
   write_xray_config
   configure_xray_auto_update
-  configure_firewall
   generate_assets
   print_summary
   send_clashverge_yaml
+  remove_old_firewall_rule
+  CONFIG_REPLACED="0"
+  HARDENING_CHANGED="0"
 }
 
 main "$@"
