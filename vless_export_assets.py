@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover - optional dependency
     qrcode = None
 
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 DEFAULT_NODE_NAME = "vless-reality"
 DEFAULT_FINGERPRINT = "chrome"
 
@@ -163,7 +163,7 @@ unified-delay: true
 
 tun:
   enable: true
-  stack: system
+  stack: gvisor
   dns-hijack:
     - any:53
     - tcp://any:53

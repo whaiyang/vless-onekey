@@ -3,7 +3,7 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_NAME="install.sh"
-SCRIPT_VERSION="1.4.0"
+SCRIPT_VERSION="1.4.1"
 XRAY_INSTALLER_COMMIT="e741a4f56d368afbb9e5be3361b40c4552d3710d"
 XRAY_INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/${XRAY_INSTALLER_COMMIT}/install-release.sh"
 XRAY_AUTO_UPDATE_SCRIPT="/usr/local/sbin/xray-auto-update.sh"
@@ -794,7 +794,7 @@ import sys
 import urllib.parse
 from pathlib import Path
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 DEFAULT_NODE_NAME = "vless-reality"
 DEFAULT_FINGERPRINT = "chrome"
 
@@ -887,7 +887,7 @@ unified-delay: true
 
 tun:
   enable: true
-  stack: system
+  stack: gvisor
   dns-hijack:
     - any:53
     - tcp://any:53
