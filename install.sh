@@ -3,7 +3,7 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_NAME="install.sh"
-SCRIPT_VERSION="1.5.0"
+SCRIPT_VERSION="1.6.0"
 XRAY_INSTALLER_COMMIT="e741a4f56d368afbb9e5be3361b40c4552d3710d"
 XRAY_INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/${XRAY_INSTALLER_COMMIT}/install-release.sh"
 XRAY_AUTO_UPDATE_SCRIPT="/usr/local/sbin/xray-auto-update.sh"
@@ -19,11 +19,22 @@ DEST_PORT="443"
 DOMAIN=""
 ACME_EMAIL=""
 TROJAN_FALLBACK_PORT="8080"
-TROJAN_CERT_DIR="/usr/local/etc/xray/certs"
+SING_BOX_VERSION="1.13.18"
+SING_BOX_SHA256_AMD64="d34d987ed6ae39ca3760269264fb502b867e5477db45518c829b07776245c495"
+SING_BOX_SHA256_ARM64="a894f6152cade4a2c9d062762d54dea0c1aee673ab4759e0829e19cace932719"
+SING_BOX_BIN="/usr/local/bin/sing-box"
+SING_BOX_CONFIG_DIR="/etc/sing-box"
+SING_BOX_CONFIG="${SING_BOX_CONFIG_DIR}/config.json"
+SING_BOX_CERT_DIR="${SING_BOX_CONFIG_DIR}/certs"
+SING_BOX_SERVICE="/etc/systemd/system/sing-box.service"
+SING_BOX_RUN_USER="sing-box"
+SING_BOX_RUN_GROUP="sing-box"
+TROJAN_CERT_DIR="${SING_BOX_CERT_DIR}"
 TROJAN_WEB_ROOT="/var/www/vless-onekey"
 TROJAN_NGINX_CONFIG="/etc/nginx/conf.d/vless-onekey-fallback.conf"
 NGINX_DEFAULT_SITE="/etc/nginx/sites-enabled/default"
-TROJAN_RENEW_HOOK="/etc/letsencrypt/renewal-hooks/deploy/vless-onekey-xray-cert.sh"
+TROJAN_RENEW_HOOK="/etc/letsencrypt/renewal-hooks/deploy/vless-onekey-sing-box-cert.sh"
+LEGACY_TROJAN_RENEW_HOOK="/etc/letsencrypt/renewal-hooks/deploy/vless-onekey-xray-cert.sh"
 NODE_NAME=""
 CLIENT_FINGERPRINT="chrome"
 MAX_TIME_DIFF_MS="60000"
@@ -45,7 +56,8 @@ ALLOW_NON_443="0"
 
 OS_ID=""
 OS_VERSION_ID=""
-CONFIG_FILE="/usr/local/etc/xray/config.json"
+XRAY_CONFIG="/usr/local/etc/xray/config.json"
+CONFIG_FILE="${XRAY_CONFIG}"
 CONFIG_BACKUP_FILE=""
 CONFIG_WAS_BACKED_UP="0"
 CONFIG_REPLACED="0"
@@ -69,12 +81,22 @@ NGINX_CONFIG_CHANGED="0"
 NGINX_DEFAULT_REMOVED="0"
 RENEW_HOOK_BACKUP_FILE=""
 RENEW_HOOK_CHANGED="0"
+SING_BOX_CONFIG_WAS_BACKED_UP="0"
+SING_BOX_CONFIG_BACKUP_FILE=""
+SING_BOX_CONFIG_REPLACED="0"
+SING_BOX_CHANGED="0"
+SING_BOX_SERVICE_WAS_BACKED_UP="0"
+SING_BOX_SERVICE_BACKUP_FILE=""
+SING_BOX_BIN_CHANGED="0"
+SING_BOX_BIN_BACKUP_FILE=""
+SING_BOX_WAS_ACTIVE="0"
+XRAY_STOPPED_FOR_TROJAN="0"
 
 usage() {
   cat <<EOF
 ${SCRIPT_NAME} v${SCRIPT_VERSION}
 
-One-command installer for Xray VLESS Reality or Trojan TLS with local export assets.
+One-command installer for Xray VLESS Reality or sing-box Trojan TLS with local export assets.
 
 Usage:
   bash ${SCRIPT_NAME} [options]
@@ -93,12 +115,12 @@ Options:
   --fingerprint VALUE       Client fingerprint for exports. Default: ${CLIENT_FINGERPRINT}
   --artifact-dir PATH       Directory for generated files. Default: ${ARTIFACT_DIR}
   --public-ip IP            Override auto-detected public IP
-  --force-overwrite         Replace an existing Xray config after creating a timestamped backup
-  --upgrade-xray            Update existing Xray to latest stable release. This is the default
-  --skip-xray-upgrade       Keep an existing Xray binary instead of checking for updates
-  --xray-beta               Install/update latest Xray pre-release instead of stable release
-  --auto-update-xray        Enable a daily systemd timer to update Xray automatically
-  --skip-auto-update-xray   Do not enable the Xray automatic update timer. This is the default
+  --force-overwrite         Replace an existing backend config after creating a timestamped backup
+  --upgrade-xray            Reality only: update Xray to latest stable release. This is the default
+  --skip-xray-upgrade       Reality only: keep the installed Xray binary
+  --xray-beta               Reality only: install/update latest Xray pre-release
+  --auto-update-xray        Reality only: enable a daily Xray update timer
+  --skip-auto-update-xray   Reality only: disable the Xray update timer. This is the default
   --auto-update-time TIME   Daily auto-update time in HH:MM or HH:MM:SS. Default: ${AUTO_UPDATE_TIME}
   --skip-firewall           Do not change UFW rules
   --skip-packages           Skip apt package installation
@@ -134,6 +156,7 @@ die() {
 cleanup_on_error() {
   local exit_code="$?"
   local restart_xray="0"
+  local restart_sing_box="0"
   if [[ "${exit_code}" -eq 0 ]]; then
     return
   fi
@@ -148,6 +171,18 @@ cleanup_on_error() {
     warn "Restored the previous Xray config from: ${CONFIG_BACKUP_FILE}"
     restart_xray="1"
   fi
+  if [[ "${SING_BOX_CONFIG_REPLACED}" == "1" ]]; then
+    systemctl stop sing-box >/dev/null 2>&1 || true
+    if [[ "${SING_BOX_CONFIG_WAS_BACKED_UP}" == "1" && -f "${SING_BOX_CONFIG_BACKUP_FILE}" ]]; then
+      cp "${SING_BOX_CONFIG_BACKUP_FILE}" "${SING_BOX_CONFIG}"
+      warn "Restored the previous sing-box config from: ${SING_BOX_CONFIG_BACKUP_FILE}"
+      if [[ "${SING_BOX_WAS_ACTIVE}" == "1" ]]; then
+        restart_sing_box="1"
+      fi
+    else
+      rm -f "${SING_BOX_CONFIG}"
+    fi
+  fi
   if [[ "${HARDENING_CHANGED}" == "1" ]]; then
     if [[ -n "${HARDENING_BACKUP_FILE}" && -f "${HARDENING_BACKUP_FILE}" ]]; then
       cp "${HARDENING_BACKUP_FILE}" "${XRAY_HARDENING_DROP_IN}"
@@ -157,6 +192,24 @@ cleanup_on_error() {
     systemctl daemon-reload
     warn "Restored the previous Xray systemd hardening configuration."
     restart_xray="1"
+  fi
+  if [[ "${SING_BOX_CHANGED}" == "1" ]]; then
+    if [[ "${SING_BOX_SERVICE_WAS_BACKED_UP}" == "1" && -f "${SING_BOX_SERVICE_BACKUP_FILE}" ]]; then
+      cp "${SING_BOX_SERVICE_BACKUP_FILE}" "${SING_BOX_SERVICE}"
+    else
+      rm -f "${SING_BOX_SERVICE}"
+    fi
+    systemctl daemon-reload
+    warn "Restored the previous sing-box systemd service definition."
+  fi
+  if [[ "${SING_BOX_BIN_CHANGED}" == "1" ]]; then
+    if [[ -n "${SING_BOX_BIN_BACKUP_FILE}" && -f "${SING_BOX_BIN_BACKUP_FILE}" ]]; then
+      cp "${SING_BOX_BIN_BACKUP_FILE}" "${SING_BOX_BIN}"
+      chmod 755 "${SING_BOX_BIN}"
+      warn "Restored the previous sing-box binary."
+    else
+      rm -f "${SING_BOX_BIN}"
+    fi
   fi
   if [[ "${RENEW_HOOK_CHANGED}" == "1" ]]; then
     if [[ -n "${RENEW_HOOK_BACKUP_FILE}" && -f "${RENEW_HOOK_BACKUP_FILE}" ]]; then
@@ -180,6 +233,14 @@ cleanup_on_error() {
   fi
   if [[ "${restart_xray}" == "1" ]]; then
     systemctl restart xray
+  fi
+  if [[ "${restart_sing_box}" == "1" ]]; then
+    systemctl restart sing-box
+  elif [[ "${XRAY_STOPPED_FOR_TROJAN}" == "1" ]]; then
+    systemctl disable --now sing-box >/dev/null 2>&1 || true
+    systemctl enable xray >/dev/null 2>&1 || true
+    systemctl restart xray >/dev/null 2>&1 || true
+    warn "Restored Xray after the sing-box Trojan deployment failed."
   fi
   exit "${exit_code}"
 }
@@ -375,6 +436,8 @@ validate_args() {
     if [[ "${ALLOW_NON_443}" != "1" && "${PORT}" != "443" ]]; then
       die "Trojan TLS should use port 443. Re-run with --allow-non-443 only after reviewing compatibility."
     fi
+    [[ "${XRAY_BETA}" != "1" ]] || die "--xray-beta is only valid with --protocol reality"
+    [[ "${AUTO_UPDATE_XRAY}" != "1" ]] || die "--auto-update-xray is only valid with --protocol reality"
   fi
 
   [[ "${AUTO_UPDATE_TIME}" =~ ^([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$ ]] || die "--auto-update-time must be HH:MM or HH:MM:SS"
@@ -389,6 +452,7 @@ ensure_defaults() {
   fi
   if [[ "${PROTOCOL}" == "trojan" ]]; then
     SNI="${DOMAIN}"
+    CONFIG_FILE="${SING_BOX_CONFIG}"
   fi
   if [[ -z "${NODE_NAME}" ]]; then
     NODE_NAME="$(hostname)"
@@ -413,11 +477,6 @@ Config action  : ${config_action}
 Listen port    : ${PORT}
 Node name      : ${NODE_NAME}
 Artifact dir   : ${ARTIFACT_DIR}
-Xray run user  : ${XRAY_RUN_USER}
-Xray channel   : $([[ "${XRAY_BETA}" == "1" ]] && printf 'pre-release' || printf 'stable')
-Upgrade Xray   : $([[ "${SKIP_XRAY_UPGRADE}" == "1" ]] && printf 'no' || printf 'yes')
-Auto update    : ${AUTO_UPDATE_XRAY}
-Auto update at : ${AUTO_UPDATE_TIME}
 Skip firewall  : ${SKIP_FIREWALL}
 Skip packages  : ${SKIP_PACKAGES}
 Skip QR        : ${SKIP_QR}
@@ -430,6 +489,10 @@ SNI            : ${SNI}
 Reality dest   : ${DEST_HOST}:${DEST_PORT}
 Fingerprint    : ${CLIENT_FINGERPRINT}
 Max time diff  : ${MAX_TIME_DIFF_MS} ms
+Backend        : Xray ($([[ "${XRAY_BETA}" == "1" ]] && printf 'pre-release' || printf 'stable'))
+Upgrade Xray   : $([[ "${SKIP_XRAY_UPGRADE}" == "1" ]] && printf 'no' || printf 'yes')
+Auto update    : ${AUTO_UPDATE_XRAY}
+Auto update at : ${AUTO_UPDATE_TIME}
 EOF
   else
     cat <<EOF
@@ -437,12 +500,13 @@ TLS domain     : ${DOMAIN}
 ACME email     : ${ACME_EMAIL:-not provided}
 Fallback       : 127.0.0.1:${TROJAN_FALLBACK_PORT}
 Certificate    : Let's Encrypt with automatic renewal
+Backend        : sing-box ${SING_BOX_VERSION}
+Auto update    : disabled; upgrades require a reviewed script release
 EOF
-    warn "Xray currently marks the legacy Trojan protocol as deprecated; verify compatibility before major Xray upgrades."
   fi
 
   if [[ "${KEEP_EXISTING_CONFIG}" == "1" ]]; then
-    warn "Existing Xray config found at ${CONFIG_FILE}; it will be preserved."
+    warn "Existing backend config found at ${CONFIG_FILE}; it will be preserved."
     warn "Re-run with --force-overwrite if you really want to replace it and export a new node."
   fi
 
@@ -488,18 +552,19 @@ install_dependencies() {
     passwd \
     python3 \
     qrencode \
+    tar \
     ufw \
     unzip \
     uuid-runtime
   )
-  if [[ "${PROTOCOL}" == "trojan" && "${KEEP_EXISTING_CONFIG}" != "1" ]]; then
+  if [[ "${PROTOCOL}" == "trojan" ]]; then
     packages+=(certbot nginx)
   fi
   apt-get install -y "${packages[@]}"
 }
 
 ensure_required_commands() {
-  local required=(curl openssl python3 awk sed ss timeout useradd mktemp)
+  local required=(curl openssl python3 awk sed ss timeout useradd mktemp sha256sum)
   local missing=()
   local cmd
   for cmd in "${required[@]}"; do
@@ -511,10 +576,11 @@ ensure_required_commands() {
   if (( ${#missing[@]} > 0 )); then
     die "Missing required commands: ${missing[*]}"
   fi
-  if [[ "${PROTOCOL}" == "trojan" && "${KEEP_EXISTING_CONFIG}" != "1" ]]; then
+  if [[ "${PROTOCOL}" == "trojan" ]]; then
     command_exists certbot || die "certbot is required for Trojan TLS"
     command_exists nginx || die "nginx is required for the Trojan fallback site"
-    command_exists runuser || die "runuser is required to validate Xray as its service user"
+    command_exists runuser || die "runuser is required to validate sing-box as its service user"
+    command_exists tar || die "tar is required to install sing-box"
   fi
 }
 
@@ -561,6 +627,124 @@ install_xray() {
   XRAY_BIN="$(command -v xray || true)"
   [[ -n "${XRAY_BIN}" ]] || XRAY_BIN="/usr/local/bin/xray"
   [[ -x "${XRAY_BIN}" ]] || die "Xray installation completed but xray binary was not found."
+}
+
+ensure_sing_box_run_user() {
+  if ! id "${SING_BOX_RUN_USER}" >/dev/null 2>&1; then
+    useradd --system --user-group --create-home --home-dir /var/lib/sing-box --shell /usr/sbin/nologin "${SING_BOX_RUN_USER}"
+  fi
+  SING_BOX_RUN_GROUP="$(id -gn "${SING_BOX_RUN_USER}")"
+  install -d -m 750 -o "${SING_BOX_RUN_USER}" -g "${SING_BOX_RUN_GROUP}" /var/lib/sing-box
+  install -d -m 750 -o root -g "${SING_BOX_RUN_GROUP}" "${SING_BOX_CONFIG_DIR}"
+}
+
+install_sing_box() {
+  local machine_arch
+  local release_arch
+  local expected_sha256
+  local download_url
+  local temp_dir
+  local archive
+  local extracted_bin
+
+  machine_arch="$(uname -m)"
+  case "${machine_arch}" in
+    x86_64|amd64)
+      release_arch="amd64"
+      expected_sha256="${SING_BOX_SHA256_AMD64}"
+      ;;
+    aarch64|arm64)
+      release_arch="arm64"
+      expected_sha256="${SING_BOX_SHA256_ARM64}"
+      ;;
+    *)
+      die "Unsupported architecture for sing-box Trojan: ${machine_arch}"
+      ;;
+  esac
+
+  download_url="https://github.com/SagerNet/sing-box/releases/download/v${SING_BOX_VERSION}/sing-box-${SING_BOX_VERSION}-linux-${release_arch}.tar.gz"
+  temp_dir="$(mktemp -d /tmp/vless-onekey-sing-box.XXXXXX)"
+  archive="${temp_dir}/sing-box.tar.gz"
+  extracted_bin="${temp_dir}/sing-box-${SING_BOX_VERSION}-linux-${release_arch}/sing-box"
+
+  log "Installing verified sing-box ${SING_BOX_VERSION} for ${release_arch}"
+  curl -fsSL --retry 3 --connect-timeout 15 -o "${archive}" "${download_url}" || {
+    rm -rf "${temp_dir}"
+    die "Failed to download sing-box ${SING_BOX_VERSION}."
+  }
+  [[ "$(sha256sum "${archive}" | awk '{print $1}')" == "${expected_sha256}" ]] || {
+    rm -rf "${temp_dir}"
+    die "sing-box archive checksum mismatch."
+  }
+  tar -xzf "${archive}" -C "${temp_dir}" || {
+    rm -rf "${temp_dir}"
+    die "Failed to extract the sing-box archive."
+  }
+  [[ -x "${extracted_bin}" ]] || {
+    rm -rf "${temp_dir}"
+    die "The sing-box archive did not contain the expected binary."
+  }
+  if [[ -f "${SING_BOX_BIN}" ]]; then
+    SING_BOX_BIN_BACKUP_FILE="${SING_BOX_BIN}.bak.$(date +%Y%m%d%H%M%S)"
+    cp -p "${SING_BOX_BIN}" "${SING_BOX_BIN_BACKUP_FILE}"
+    chmod 700 "${SING_BOX_BIN_BACKUP_FILE}"
+  fi
+  install -m 755 -o root -g root "${extracted_bin}" "${SING_BOX_BIN}"
+  SING_BOX_BIN_CHANGED="1"
+  rm -rf "${temp_dir}"
+  "${SING_BOX_BIN}" version | grep -q "sing-box version ${SING_BOX_VERSION}" || die "Unexpected sing-box version after installation."
+}
+
+configure_sing_box_service() {
+  if [[ -f "${SING_BOX_SERVICE}" ]]; then
+    SING_BOX_SERVICE_BACKUP_FILE="${SING_BOX_SERVICE}.bak.$(date +%Y%m%d%H%M%S)"
+    cp -p "${SING_BOX_SERVICE}" "${SING_BOX_SERVICE_BACKUP_FILE}"
+    chmod 600 "${SING_BOX_SERVICE_BACKUP_FILE}"
+    SING_BOX_SERVICE_WAS_BACKED_UP="1"
+  fi
+  cat > "${SING_BOX_SERVICE}" <<EOF
+[Unit]
+Description=sing-box Trojan TLS Service
+Documentation=https://sing-box.sagernet.org/
+Wants=network-online.target
+After=network-online.target nginx.service
+
+[Service]
+Type=simple
+User=${SING_BOX_RUN_USER}
+Group=${SING_BOX_RUN_GROUP}
+ExecStart=${SING_BOX_BIN} run -c ${SING_BOX_CONFIG}
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+LimitNOFILE=1048576
+UMask=0077
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+StateDirectory=sing-box
+StateDirectoryMode=0750
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  chmod 644 "${SING_BOX_SERVICE}"
+  SING_BOX_CHANGED="1"
+  systemctl daemon-reload
 }
 
 configure_xray_service_hardening() {
@@ -814,9 +998,9 @@ issue_trojan_certificate() {
 
 install_trojan_certificates() {
   local lineage="/etc/letsencrypt/live/${DOMAIN}"
-  install -d -m 750 -o root -g "${XRAY_RUN_GROUP}" "${TROJAN_CERT_DIR}"
-  install -m 640 -o root -g "${XRAY_RUN_GROUP}" "${lineage}/fullchain.pem" "${TROJAN_CERT_DIR}/${DOMAIN}.fullchain.pem"
-  install -m 640 -o root -g "${XRAY_RUN_GROUP}" "${lineage}/privkey.pem" "${TROJAN_CERT_DIR}/${DOMAIN}.key.pem"
+  install -d -m 750 -o root -g "${SING_BOX_RUN_GROUP}" "${TROJAN_CERT_DIR}"
+  install -m 640 -o root -g "${SING_BOX_RUN_GROUP}" "${lineage}/fullchain.pem" "${TROJAN_CERT_DIR}/${DOMAIN}.fullchain.pem"
+  install -m 640 -o root -g "${SING_BOX_RUN_GROUP}" "${lineage}/privkey.pem" "${TROJAN_CERT_DIR}/${DOMAIN}.key.pem"
 }
 
 configure_trojan_certificate_renewal() {
@@ -834,21 +1018,21 @@ configure_trojan_certificate_renewal() {
 set -Eeuo pipefail
 
 DOMAIN="${DOMAIN}"
-XRAY_GROUP="${XRAY_RUN_GROUP}"
-XRAY_BIN="${XRAY_BIN}"
-CONFIG_FILE="${CONFIG_FILE}"
+SING_BOX_GROUP="${SING_BOX_RUN_GROUP}"
+SING_BOX_BIN="${SING_BOX_BIN}"
+CONFIG_FILE="${SING_BOX_CONFIG}"
 CERT_DIR="${TROJAN_CERT_DIR}"
 
 if [[ " \${RENEWED_DOMAINS:-} " != *" \${DOMAIN} "* ]]; then
   exit 0
 fi
 LINEAGE="\${RENEWED_LINEAGE:-/etc/letsencrypt/live/\${DOMAIN}}"
-install -d -m 750 -o root -g "\${XRAY_GROUP}" "\${CERT_DIR}"
-install -m 640 -o root -g "\${XRAY_GROUP}" "\${LINEAGE}/fullchain.pem" "\${CERT_DIR}/\${DOMAIN}.fullchain.pem"
-install -m 640 -o root -g "\${XRAY_GROUP}" "\${LINEAGE}/privkey.pem" "\${CERT_DIR}/\${DOMAIN}.key.pem"
-runuser -u "${XRAY_RUN_USER}" -- "\${XRAY_BIN}" run -test -config "\${CONFIG_FILE}" >/dev/null
-systemctl restart xray
-systemctl is-active --quiet xray
+install -d -m 750 -o root -g "\${SING_BOX_GROUP}" "\${CERT_DIR}"
+install -m 640 -o root -g "\${SING_BOX_GROUP}" "\${LINEAGE}/fullchain.pem" "\${CERT_DIR}/\${DOMAIN}.fullchain.pem"
+install -m 640 -o root -g "\${SING_BOX_GROUP}" "\${LINEAGE}/privkey.pem" "\${CERT_DIR}/\${DOMAIN}.key.pem"
+runuser -u "${SING_BOX_RUN_USER}" -- "\${SING_BOX_BIN}" check -c "\${CONFIG_FILE}" >/dev/null
+systemctl restart sing-box
+systemctl is-active --quiet sing-box
 EOF
   chmod 700 "${TROJAN_RENEW_HOOK}"
 
@@ -870,8 +1054,13 @@ verify_trojan_fallback() {
 check_listen_port_available() {
   local listeners
   listeners="$(ss -H -ltnp "sport = :${PORT}" 2>/dev/null || true)"
-  if [[ -n "${listeners}" ]] && ! grep -q 'users:(("xray"' <<<"${listeners}"; then
-    die "TCP port ${PORT} is already used by another process: ${listeners}"
+  if [[ -n "${listeners}" ]]; then
+    if [[ "${PROTOCOL}" == "reality" ]] && ! grep -q 'users:(("xray"' <<<"${listeners}"; then
+      die "TCP port ${PORT} is already used by another process: ${listeners}"
+    fi
+    if [[ "${PROTOCOL}" == "trojan" ]] && ! grep -Eq 'users:\(\("(xray|sing-box)"' <<<"${listeners}"; then
+      die "TCP port ${PORT} is already used by another process: ${listeners}"
+    fi
   fi
 }
 
@@ -884,6 +1073,18 @@ wait_for_xray_listener() {
     sleep 0.25
   done
   die "Xray is active but is not listening on TCP port ${PORT}."
+}
+
+wait_for_proxy_listener() {
+  local process_name="${1}"
+  local attempt
+  for attempt in {1..40}; do
+    if ss -H -ltnp "sport = :${PORT}" 2>/dev/null | grep -q "users:((\"${process_name}\""; then
+      return
+    fi
+    sleep 0.25
+  done
+  die "${process_name} is active but is not listening on TCP port ${PORT}."
 }
 
 detect_public_ip() {
@@ -1048,89 +1249,133 @@ EOF
   wait_for_xray_listener
 }
 
-write_trojan_xray_config() {
-  backup_existing_config
+write_trojan_sing_box_config() {
+  if [[ -f "${CONFIG_FILE}" ]]; then
+    SING_BOX_CONFIG_BACKUP_FILE="${CONFIG_FILE}.bak.$(date +%Y%m%d%H%M%S)"
+    cp -p "${CONFIG_FILE}" "${SING_BOX_CONFIG_BACKUP_FILE}"
+    chmod 600 "${SING_BOX_CONFIG_BACKUP_FILE}"
+    SING_BOX_CONFIG_WAS_BACKED_UP="1"
+    log "Existing sing-box config backed up to ${SING_BOX_CONFIG_BACKUP_FILE}"
+  fi
+  if [[ -f "${XRAY_CONFIG}" ]]; then
+    local legacy_backup="${XRAY_CONFIG}.trojan-backup.$(date +%Y%m%d%H%M%S)"
+    cp -p "${XRAY_CONFIG}" "${legacy_backup}"
+    chmod 600 "${legacy_backup}"
+    OLD_XRAY_PORT="$(
+      python3 - "${XRAY_CONFIG}" <<'PY' 2>/dev/null || true
+import json
+import sys
 
-  log "Writing Xray Trojan TLS config"
-  cat > "${CONFIG_FILE}" <<EOF
+with open(sys.argv[1], encoding="utf-8") as fh:
+    config = json.load(fh)
+for inbound in config.get("inbounds", []):
+    if isinstance(inbound.get("port"), int):
+        print(inbound["port"])
+        break
+PY
+    )"
+    log "Legacy Xray config backed up to ${legacy_backup}"
+  fi
+
+  install -d -m 750 -o root -g "${SING_BOX_RUN_GROUP}" "${SING_BOX_CONFIG_DIR}"
+
+  log "Writing sing-box Trojan TLS config"
+  cat > "${SING_BOX_CONFIG}" <<EOF
 {
   "log": {
-    "loglevel": "warning"
+    "level": "warn",
+    "timestamp": true
   },
   "inbounds": [
     {
+      "type": "trojan",
       "tag": "trojan-in",
       "listen": "${XRAY_LISTEN}",
-      "port": ${PORT},
-      "protocol": "trojan",
-      "settings": {
-        "clients": [
-          {
-            "password": "${TROJAN_PASSWORD}",
-            "email": "${DOMAIN}"
-          }
-        ],
-        "fallbacks": [
-          {
-            "dest": "127.0.0.1:${TROJAN_FALLBACK_PORT}"
-          }
-        ]
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "tls",
-        "tlsSettings": {
-          "minVersion": "1.2",
-          "maxVersion": "1.3",
-          "alpn": [
-            "http/1.1"
-          ],
-          "certificates": [
-            {
-              "certificateFile": "${TROJAN_CERT_DIR}/${DOMAIN}.fullchain.pem",
-              "keyFile": "${TROJAN_CERT_DIR}/${DOMAIN}.key.pem"
-            }
-          ]
+      "listen_port": ${PORT},
+      "tcp_keep_alive": "10m",
+      "tcp_keep_alive_interval": "30s",
+      "users": [
+        {
+          "name": "${DOMAIN}",
+          "password": "${TROJAN_PASSWORD}"
         }
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "${DOMAIN}",
+        "alpn": ["http/1.1"],
+        "min_version": "1.2",
+        "max_version": "1.3",
+        "certificate_path": "${TROJAN_CERT_DIR}/${DOMAIN}.fullchain.pem",
+        "key_path": "${TROJAN_CERT_DIR}/${DOMAIN}.key.pem"
+      },
+      "fallback": {
+        "server": "127.0.0.1",
+        "server_port": ${TROJAN_FALLBACK_PORT}
       }
     }
   ],
   "outbounds": [
     {
-      "protocol": "freedom",
+      "type": "direct",
       "tag": "direct"
-    },
-    {
-      "protocol": "blackhole",
-      "tag": "block"
     }
   ],
-  "routing": {
-    "domainStrategy": "IPIfNonMatch",
+  "route": {
     "rules": [
       {
-        "type": "field",
-        "ip": [
-          "geoip:private",
-          "169.254.169.254/32",
-          "fe80::/10"
-        ],
-        "outboundTag": "block"
+        "source_ip_cidr": ["127.0.0.1/32"],
+        "ip_is_private": true,
+        "action": "route",
+        "outbound": "direct"
+      },
+      {
+        "ip_is_private": true,
+        "action": "reject"
+      },
+      {
+        "ip_cidr": ["169.254.169.254/32", "fe80::/10"],
+        "action": "reject"
       }
-    ]
+    ],
+    "final": "direct"
   }
 }
 EOF
 
-  CONFIG_REPLACED="1"
-  chown "root:${XRAY_RUN_GROUP}" "$(dirname "${CONFIG_FILE}")" "${CONFIG_FILE}"
-  chmod 750 "$(dirname "${CONFIG_FILE}")"
-  chmod 640 "${CONFIG_FILE}"
-  runuser -u "${XRAY_RUN_USER}" -- "${XRAY_BIN}" run -test -config "${CONFIG_FILE}" >/dev/null
-  systemctl enable xray >/dev/null
-  systemctl restart xray
-  systemctl is-active --quiet xray || die "Xray failed to start."
-  wait_for_xray_listener
+  SING_BOX_CONFIG_REPLACED="1"
+  chown "root:${SING_BOX_RUN_GROUP}" "${SING_BOX_CONFIG_DIR}" "${SING_BOX_CONFIG}"
+  chmod 750 "${SING_BOX_CONFIG_DIR}"
+  chmod 640 "${SING_BOX_CONFIG}"
+  runuser -u "${SING_BOX_RUN_USER}" -- "${SING_BOX_BIN}" check -c "${SING_BOX_CONFIG}" >/dev/null
+
+  if systemctl is-active --quiet xray; then
+    systemctl stop xray
+    XRAY_STOPPED_FOR_TROJAN="1"
+  fi
+  systemctl enable --now sing-box >/dev/null
+  systemctl restart sing-box
+  systemctl is-active --quiet sing-box || die "sing-box failed to start."
+  wait_for_proxy_listener "sing-box"
+  systemctl disable xray >/dev/null 2>&1 || true
+  systemctl disable --now xray-auto-update.timer >/dev/null 2>&1 || true
+}
+
+secure_existing_sing_box_config() {
+  [[ -f "${SING_BOX_CONFIG}" ]] || return
+  chown "root:${SING_BOX_RUN_GROUP}" "${SING_BOX_CONFIG_DIR}" "${SING_BOX_CONFIG}"
+  chmod 750 "${SING_BOX_CONFIG_DIR}"
+  chmod 640 "${SING_BOX_CONFIG}"
+  runuser -u "${SING_BOX_RUN_USER}" -- "${SING_BOX_BIN}" check -c "${SING_BOX_CONFIG}" >/dev/null
+  if systemctl is-active --quiet xray; then
+    systemctl stop xray
+    XRAY_STOPPED_FOR_TROJAN="1"
+  fi
+  systemctl enable --now sing-box >/dev/null
+  systemctl restart sing-box
+  systemctl is-active --quiet sing-box || die "sing-box failed after applying service hardening."
+  wait_for_proxy_listener "sing-box"
+  systemctl disable xray >/dev/null 2>&1 || true
 }
 
 secure_existing_xray_config() {
@@ -1200,7 +1445,7 @@ except ImportError:  # pragma: no cover - optional dependency
     qrcode = None
 
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 DEFAULT_NODE_NAME = "vless-reality"
 DEFAULT_TROJAN_NODE_NAME = "trojan-tls"
 DEFAULT_FINGERPRINT = "chrome"
@@ -1835,12 +2080,22 @@ print_summary() {
   cat <<EOF
 Script version : ${SCRIPT_VERSION}
 Protocol       : ${PROTOCOL}
-Xray service   : $(systemctl is-active xray)
 Config file    : ${CONFIG_FILE}
 Artifact dir   : ${ARTIFACT_DIR}
-Auto update    : $([[ "${AUTO_UPDATE_XRAY}" == "1" ]] && printf 'xray-auto-update.timer at %s' "${AUTO_UPDATE_TIME}" || printf 'disabled')
 Cert renewal   : $([[ "${PROTOCOL}" == "trojan" ]] && printf 'certbot.timer' || printf 'not applicable')
 Auto sz Clash  : $([[ "${SKIP_SZ}" == "1" ]] && printf 'disabled' || printf 'enabled')
+EOF
+
+  if [[ "${PROTOCOL}" == "reality" ]]; then
+    printf 'Xray service   : %s\n' "$(systemctl is-active xray)"
+    printf 'Auto update    : %s\n' "$([[ "${AUTO_UPDATE_XRAY}" == "1" ]] && printf 'xray-auto-update.timer at %s' "${AUTO_UPDATE_TIME}" || printf 'disabled')"
+  else
+    printf 'sing-box service: %s\n' "$(systemctl is-active sing-box)"
+    printf 'sing-box version: %s\n' "${SING_BOX_VERSION}"
+    printf 'Auto update    : disabled; upgrade through a reviewed release\n'
+  fi
+
+  cat <<EOF
 
 Node URL file  : ${ARTIFACT_DIR}/${NODE_LINK_NAME}
 
@@ -1913,6 +2168,22 @@ Re-run with --force-overwrite to generate a new ${PROTOCOL} config and export as
 EOF
 }
 
+print_sing_box_maintenance_summary() {
+  log "sing-box maintenance complete"
+  cat <<EOF
+Script version : ${SCRIPT_VERSION}
+sing-box service: $(systemctl is-active sing-box 2>/dev/null || true)
+sing-box binary : ${SING_BOX_BIN}
+Config file     : ${SING_BOX_CONFIG}
+Config action   : preserved existing config
+Auto update     : disabled; upgrade through a reviewed release
+Auto sz Clash   : $([[ "${SKIP_SZ}" == "1" ]] && printf 'disabled' || printf 'enabled')
+
+Existing sing-box config was not replaced.
+Re-run with --force-overwrite to generate a new Trojan TLS config and export assets.
+EOF
+}
+
 main() {
   parse_args "$@"
   need_root
@@ -1923,15 +2194,31 @@ main() {
   confirm_plan
   install_dependencies
   ensure_required_commands
-  ensure_xray_run_user
-  install_xray
-  configure_xray_service_hardening
+  if [[ "${PROTOCOL}" == "trojan" ]] && systemctl is-active --quiet sing-box; then
+    SING_BOX_WAS_ACTIVE="1"
+  fi
+  if [[ "${PROTOCOL}" == "reality" ]]; then
+    ensure_xray_run_user
+    install_xray
+    configure_xray_service_hardening
+  else
+    ensure_sing_box_run_user
+    install_sing_box
+    configure_sing_box_service
+  fi
   if [[ "${KEEP_EXISTING_CONFIG}" == "1" ]]; then
-    secure_existing_xray_config
-    configure_xray_auto_update
-    print_maintenance_summary
+    if [[ "${PROTOCOL}" == "reality" ]]; then
+      secure_existing_xray_config
+      configure_xray_auto_update
+      print_maintenance_summary
+    else
+      secure_existing_sing_box_config
+      systemctl disable --now xray-auto-update.timer >/dev/null 2>&1 || true
+      print_sing_box_maintenance_summary
+    fi
     send_clashverge_yaml
     HARDENING_CHANGED="0"
+    SING_BOX_CHANGED="0"
     return
   fi
   detect_public_ip
@@ -1951,17 +2238,28 @@ main() {
     issue_trojan_certificate
     install_trojan_certificates
     generate_trojan_material
-    write_trojan_xray_config
+    write_trojan_sing_box_config
     configure_trojan_certificate_renewal
     verify_trojan_fallback
   fi
-  configure_xray_auto_update
+  if [[ "${PROTOCOL}" == "reality" ]]; then
+    configure_xray_auto_update
+  else
+    systemctl disable --now xray-auto-update.timer >/dev/null 2>&1 || true
+  fi
   generate_assets
   print_summary
   send_clashverge_yaml
   remove_old_firewall_rule
+  if [[ "${PROTOCOL}" == "trojan" ]]; then
+    rm -f "${LEGACY_TROJAN_RENEW_HOOK}"
+  fi
   CONFIG_REPLACED="0"
   HARDENING_CHANGED="0"
+  SING_BOX_CONFIG_REPLACED="0"
+  SING_BOX_CHANGED="0"
+  SING_BOX_BIN_CHANGED="0"
+  XRAY_STOPPED_FOR_TROJAN="0"
 }
 
 main "$@"

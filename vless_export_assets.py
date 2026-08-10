@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover - optional dependency
     qrcode = None
 
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 DEFAULT_NODE_NAME = "vless-reality"
 DEFAULT_TROJAN_NODE_NAME = "trojan-tls"
 DEFAULT_FINGERPRINT = "chrome"
