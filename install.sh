@@ -3,7 +3,7 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_NAME="install.sh"
-SCRIPT_VERSION="1.4.2"
+SCRIPT_VERSION="1.5.0"
 XRAY_INSTALLER_COMMIT="e741a4f56d368afbb9e5be3361b40c4552d3710d"
 XRAY_INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/${XRAY_INSTALLER_COMMIT}/install-release.sh"
 XRAY_AUTO_UPDATE_SCRIPT="/usr/local/sbin/xray-auto-update.sh"
@@ -11,10 +11,19 @@ XRAY_AUTO_UPDATE_SERVICE="/etc/systemd/system/xray-auto-update.service"
 XRAY_AUTO_UPDATE_TIMER="/etc/systemd/system/xray-auto-update.timer"
 XRAY_HARDENING_DROP_IN="/etc/systemd/system/xray.service.d/20-vless-onekey-hardening.conf"
 
+PROTOCOL="reality"
 PORT="443"
 SNI=""
 DEST_HOST=""
 DEST_PORT="443"
+DOMAIN=""
+ACME_EMAIL=""
+TROJAN_FALLBACK_PORT="8080"
+TROJAN_CERT_DIR="/usr/local/etc/xray/certs"
+TROJAN_WEB_ROOT="/var/www/vless-onekey"
+TROJAN_NGINX_CONFIG="/etc/nginx/conf.d/vless-onekey-fallback.conf"
+NGINX_DEFAULT_SITE="/etc/nginx/sites-enabled/default"
+TROJAN_RENEW_HOOK="/etc/letsencrypt/renewal-hooks/deploy/vless-onekey-xray-cert.sh"
 NODE_NAME=""
 CLIENT_FINGERPRINT="chrome"
 MAX_TIME_DIFF_MS="60000"
@@ -49,22 +58,36 @@ XRAY_RUN_GROUP=""
 XRAY_LISTEN="0.0.0.0"
 CLASH_YAML_NAME=""
 OLD_XRAY_PORT=""
+NODE_URL=""
+NODE_LINK_NAME=""
+NODE_URL_TEMP_CREATED="0"
+NODE_URL_TEMP_FILE=""
+EXPORT_SERVER=""
+NGINX_PREEXISTING="0"
+NGINX_CONFIG_BACKUP_FILE=""
+NGINX_CONFIG_CHANGED="0"
+NGINX_DEFAULT_REMOVED="0"
+RENEW_HOOK_BACKUP_FILE=""
+RENEW_HOOK_CHANGED="0"
 
 usage() {
   cat <<EOF
 ${SCRIPT_NAME} v${SCRIPT_VERSION}
 
-One-command installer for Xray VLESS + Reality with local export assets.
+One-command installer for Xray VLESS Reality or Trojan TLS with local export assets.
 
 Usage:
   bash ${SCRIPT_NAME} [options]
 
 Options:
-  --port PORT               Listen port for VLESS Reality. Default: 443
+  --protocol VALUE          Deployment protocol: reality or trojan. Default: ${PROTOCOL}
+  --port PORT               Public proxy listen port. Default: 443
   --sni HOST                Required SNI and Reality serverNames; choose a verified same-ASN TLS 1.3 site
   --dest-host HOST          Reality dest host. Default: same as --sni
   --dest-port PORT          Reality dest port. Default: ${DEST_PORT}
   --max-time-diff-ms MS     Reject stale Reality handshakes beyond this clock skew. Default: ${MAX_TIME_DIFF_MS}
+  --domain HOST             Trojan TLS certificate domain; DNS must point directly to this server
+  --acme-email EMAIL        Optional Let's Encrypt ACME account email for Trojan TLS
   --allow-non-443           Explicitly allow a non-443 listen or target port
   --node-name NAME          Exported node name. Default: server hostname
   --fingerprint VALUE       Client fingerprint for exports. Default: ${CLIENT_FINGERPRINT}
@@ -88,9 +111,10 @@ Options:
 Examples:
   bash ${SCRIPT_NAME} -y --sni www.example.com
   bash ${SCRIPT_NAME} -y --sni www.example.com --node-name my-vps --force-overwrite
+  bash ${SCRIPT_NAME} -y --protocol trojan --domain proxy.example.com
 
 GitHub Raw example:
-  bash <(curl -fsSL https://raw.githubusercontent.com/<you>/<repo>/main/${SCRIPT_NAME}) -y --sni www.example.com
+  bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/${SCRIPT_NAME}) -y --sni www.example.com
 EOF
 }
 
@@ -116,6 +140,9 @@ cleanup_on_error() {
 
   set +e
   warn "Installer exited with code ${exit_code}."
+  if [[ "${NODE_URL_TEMP_CREATED}" == "1" && -n "${NODE_URL_TEMP_FILE}" ]]; then
+    rm -f "${NODE_URL_TEMP_FILE}"
+  fi
   if [[ "${CONFIG_REPLACED}" == "1" && "${CONFIG_WAS_BACKED_UP}" == "1" && -f "${CONFIG_BACKUP_FILE}" ]]; then
     cp "${CONFIG_BACKUP_FILE}" "${CONFIG_FILE}"
     warn "Restored the previous Xray config from: ${CONFIG_BACKUP_FILE}"
@@ -130,6 +157,26 @@ cleanup_on_error() {
     systemctl daemon-reload
     warn "Restored the previous Xray systemd hardening configuration."
     restart_xray="1"
+  fi
+  if [[ "${RENEW_HOOK_CHANGED}" == "1" ]]; then
+    if [[ -n "${RENEW_HOOK_BACKUP_FILE}" && -f "${RENEW_HOOK_BACKUP_FILE}" ]]; then
+      cp "${RENEW_HOOK_BACKUP_FILE}" "${TROJAN_RENEW_HOOK}"
+    else
+      rm -f "${TROJAN_RENEW_HOOK}"
+    fi
+    warn "Restored the previous Certbot deploy hook."
+  fi
+  if [[ "${NGINX_CONFIG_CHANGED}" == "1" ]]; then
+    if [[ -n "${NGINX_CONFIG_BACKUP_FILE}" && -f "${NGINX_CONFIG_BACKUP_FILE}" ]]; then
+      cp "${NGINX_CONFIG_BACKUP_FILE}" "${TROJAN_NGINX_CONFIG}"
+    else
+      rm -f "${TROJAN_NGINX_CONFIG}"
+    fi
+    if [[ "${NGINX_DEFAULT_REMOVED}" == "1" && -f /etc/nginx/sites-available/default ]]; then
+      ln -sfn /etc/nginx/sites-available/default "${NGINX_DEFAULT_SITE}"
+    fi
+    nginx -t >/dev/null 2>&1 && systemctl restart nginx
+    warn "Restored the previous Nginx configuration."
   fi
   if [[ "${restart_xray}" == "1" ]]; then
     systemctl restart xray
@@ -165,6 +212,10 @@ detect_ip_family() {
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --protocol)
+        PROTOCOL="${2:-}"
+        shift 2
+        ;;
       --port)
         PORT="${2:-}"
         shift 2
@@ -183,6 +234,14 @@ parse_args() {
         ;;
       --max-time-diff-ms)
         MAX_TIME_DIFF_MS="${2:-}"
+        shift 2
+        ;;
+      --domain)
+        DOMAIN="${2:-}"
+        shift 2
+        ;;
+      --acme-email)
+        ACME_EMAIL="${2:-}"
         shift 2
         ;;
       --allow-non-443)
@@ -286,20 +345,36 @@ detect_os() {
 }
 
 validate_args() {
-  [[ -n "${SNI}" ]] || die "--sni is required. Choose a verified same-ASN TLS 1.3 target."
-  [[ "${SNI}" =~ ^[A-Za-z0-9.-]+$ ]] || die "Invalid --sni value: ${SNI}"
-  [[ -z "${DEST_HOST}" || "${DEST_HOST}" =~ ^[A-Za-z0-9.-]+$ ]] || die "Invalid --dest-host value: ${DEST_HOST}"
+  [[ "${PROTOCOL}" == "reality" || "${PROTOCOL}" == "trojan" ]] || die "--protocol must be exactly reality or trojan"
   [[ "${CLIENT_FINGERPRINT}" =~ ^[A-Za-z0-9._-]+$ ]] || die "Invalid --fingerprint value: ${CLIENT_FINGERPRINT}"
 
   [[ "${PORT}" =~ ^[0-9]+$ ]] || die "--port must be a number"
   (( PORT >= 1 && PORT <= 65535 )) || die "--port must be between 1 and 65535"
 
-  [[ "${DEST_PORT}" =~ ^[0-9]+$ ]] || die "--dest-port must be a number"
-  (( DEST_PORT >= 1 && DEST_PORT <= 65535 )) || die "--dest-port must be between 1 and 65535"
-  [[ "${MAX_TIME_DIFF_MS}" =~ ^[0-9]+$ ]] || die "--max-time-diff-ms must be a non-negative number"
-
-  if [[ "${ALLOW_NON_443}" != "1" ]] && { [[ "${PORT}" != "443" ]] || [[ "${DEST_PORT}" != "443" ]]; }; then
-    die "REALITY should use port 443. Re-run with --allow-non-443 only after reviewing the blocking risk."
+  if [[ "${PROTOCOL}" == "reality" ]]; then
+    [[ -n "${SNI}" ]] || die "--sni is required for Reality. Choose a verified same-ASN TLS 1.3 target."
+    [[ "${SNI}" =~ ^[A-Za-z0-9.-]+$ ]] || die "Invalid --sni value: ${SNI}"
+    [[ -z "${DEST_HOST}" || "${DEST_HOST}" =~ ^[A-Za-z0-9.-]+$ ]] || die "Invalid --dest-host value: ${DEST_HOST}"
+    [[ -z "${DOMAIN}" ]] || die "--domain is only valid with --protocol trojan"
+    [[ -z "${ACME_EMAIL}" ]] || die "--acme-email is only valid with --protocol trojan"
+    [[ "${DEST_PORT}" =~ ^[0-9]+$ ]] || die "--dest-port must be a number"
+    (( DEST_PORT >= 1 && DEST_PORT <= 65535 )) || die "--dest-port must be between 1 and 65535"
+    [[ "${MAX_TIME_DIFF_MS}" =~ ^[0-9]+$ ]] || die "--max-time-diff-ms must be a non-negative number"
+    if [[ "${ALLOW_NON_443}" != "1" ]] && { [[ "${PORT}" != "443" ]] || [[ "${DEST_PORT}" != "443" ]]; }; then
+      die "REALITY should use port 443. Re-run with --allow-non-443 only after reviewing the blocking risk."
+    fi
+  else
+    [[ -n "${DOMAIN}" ]] || die "--domain is required for Trojan TLS"
+    [[ "${DOMAIN}" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ && "${DOMAIN}" == *.* && "${DOMAIN}" != *..* ]] || die "Invalid --domain value: ${DOMAIN}"
+    [[ -z "${SNI}" ]] || die "Use --domain instead of --sni with --protocol trojan"
+    [[ -z "${DEST_HOST}" ]] || die "--dest-host is only valid with --protocol reality"
+    [[ "${DEST_PORT}" == "443" ]] || die "--dest-port is only valid with --protocol reality"
+    if [[ -n "${ACME_EMAIL}" ]]; then
+      [[ "${ACME_EMAIL}" =~ ^[^[:space:]@]+@[^[:space:]@]+\.[^[:space:]@]+$ ]] || die "Invalid --acme-email value"
+    fi
+    if [[ "${ALLOW_NON_443}" != "1" && "${PORT}" != "443" ]]; then
+      die "Trojan TLS should use port 443. Re-run with --allow-non-443 only after reviewing compatibility."
+    fi
   fi
 
   [[ "${AUTO_UPDATE_TIME}" =~ ^([01][0-9]|2[0-3]):[0-5][0-9](:[0-5][0-9])?$ ]] || die "--auto-update-time must be HH:MM or HH:MM:SS"
@@ -309,8 +384,11 @@ validate_args() {
 }
 
 ensure_defaults() {
-  if [[ -z "${DEST_HOST}" ]]; then
+  if [[ "${PROTOCOL}" == "reality" && -z "${DEST_HOST}" ]]; then
     DEST_HOST="${SNI}"
+  fi
+  if [[ "${PROTOCOL}" == "trojan" ]]; then
+    SNI="${DOMAIN}"
   fi
   if [[ -z "${NODE_NAME}" ]]; then
     NODE_NAME="$(hostname)"
@@ -330,13 +408,10 @@ confirm_plan() {
   cat <<EOF
 Script version : ${SCRIPT_VERSION}
 OS             : ${OS_ID} ${OS_VERSION_ID}
+Protocol       : ${PROTOCOL}
 Config action  : ${config_action}
 Listen port    : ${PORT}
-SNI            : ${SNI}
-Reality dest   : ${DEST_HOST}:${DEST_PORT}
 Node name      : ${NODE_NAME}
-Fingerprint    : ${CLIENT_FINGERPRINT}
-Max time diff  : ${MAX_TIME_DIFF_MS} ms
 Artifact dir   : ${ARTIFACT_DIR}
 Xray run user  : ${XRAY_RUN_USER}
 Xray channel   : $([[ "${XRAY_BETA}" == "1" ]] && printf 'pre-release' || printf 'stable')
@@ -348,6 +423,23 @@ Skip packages  : ${SKIP_PACKAGES}
 Skip QR        : ${SKIP_QR}
 Auto sz Clash  : $([[ "${SKIP_SZ}" == "1" ]] && printf 'no' || printf 'yes')
 EOF
+
+  if [[ "${PROTOCOL}" == "reality" ]]; then
+    cat <<EOF
+SNI            : ${SNI}
+Reality dest   : ${DEST_HOST}:${DEST_PORT}
+Fingerprint    : ${CLIENT_FINGERPRINT}
+Max time diff  : ${MAX_TIME_DIFF_MS} ms
+EOF
+  else
+    cat <<EOF
+TLS domain     : ${DOMAIN}
+ACME email     : ${ACME_EMAIL:-not provided}
+Fallback       : 127.0.0.1:${TROJAN_FALLBACK_PORT}
+Certificate    : Let's Encrypt with automatic renewal
+EOF
+    warn "Xray currently marks the legacy Trojan protocol as deprecated; verify compatibility before major Xray upgrades."
+  fi
 
   if [[ "${KEEP_EXISTING_CONFIG}" == "1" ]]; then
     warn "Existing Xray config found at ${CONFIG_FILE}; it will be preserved."
@@ -373,6 +465,12 @@ EOF
   fi
 }
 
+detect_existing_nginx() {
+  if command_exists nginx; then
+    NGINX_PREEXISTING="1"
+  fi
+}
+
 install_dependencies() {
   if [[ "${SKIP_PACKAGES}" == "1" ]]; then
     log "Skipping apt package installation by request"
@@ -382,7 +480,7 @@ install_dependencies() {
   log "Installing system packages"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y \
+  local packages=(
     ca-certificates \
     curl \
     lrzsz \
@@ -393,10 +491,15 @@ install_dependencies() {
     ufw \
     unzip \
     uuid-runtime
+  )
+  if [[ "${PROTOCOL}" == "trojan" && "${KEEP_EXISTING_CONFIG}" != "1" ]]; then
+    packages+=(certbot nginx)
+  fi
+  apt-get install -y "${packages[@]}"
 }
 
 ensure_required_commands() {
-  local required=(curl openssl python3 awk sed ss timeout useradd)
+  local required=(curl openssl python3 awk sed ss timeout useradd mktemp)
   local missing=()
   local cmd
   for cmd in "${required[@]}"; do
@@ -407,6 +510,11 @@ ensure_required_commands() {
 
   if (( ${#missing[@]} > 0 )); then
     die "Missing required commands: ${missing[*]}"
+  fi
+  if [[ "${PROTOCOL}" == "trojan" && "${KEEP_EXISTING_CONFIG}" != "1" ]]; then
+    command_exists certbot || die "certbot is required for Trojan TLS"
+    command_exists nginx || die "nginx is required for the Trojan fallback site"
+    command_exists runuser || die "runuser is required to validate Xray as its service user"
   fi
 }
 
@@ -566,6 +674,199 @@ validate_reality_target() {
   log "Reality target validation passed: ${SNI} via ${DEST_HOST}:${DEST_PORT}"
 }
 
+validate_trojan_domain_dns() {
+  local dns_output
+  local public_ipv4=""
+  local public_ipv6=""
+  log "Validating Trojan domain DNS"
+  public_ipv4="$(curl -4fsSL https://api64.ipify.org 2>/dev/null || true)"
+  public_ipv6="$(curl -6fsSL https://api64.ipify.org 2>/dev/null || true)"
+  dns_output="$(python3 - "${DOMAIN}" "${PUBLIC_IP}" "${public_ipv4}" "${public_ipv6}" 2>&1 <<'PY'
+import ipaddress
+import socket
+import sys
+
+domain = sys.argv[1]
+expected = {
+    ipaddress.ip_address(value)
+    for value in sys.argv[2:]
+    if value
+}
+try:
+    resolved = {
+        ipaddress.ip_address(item[4][0])
+        for item in socket.getaddrinfo(domain, None, type=socket.SOCK_STREAM)
+    }
+except socket.gaierror as exc:
+    raise SystemExit(f"DNS lookup failed for {domain}: {exc}")
+unexpected = resolved - expected
+if not resolved or unexpected:
+    resolved_values = ", ".join(sorted(map(str, resolved))) or "no addresses"
+    expected_values = ", ".join(sorted(map(str, expected))) or "no detected addresses"
+    raise SystemExit(
+        f"{domain} resolves to {resolved_values}; this server exposes {expected_values}. "
+        "Disable CDN/proxy mode and correct the A/AAAA record first."
+    )
+PY
+  )" || die "${dns_output}"
+  log "Domain DNS points only to this server: ${DOMAIN}"
+}
+
+configure_trojan_fallback() {
+  local ipv6_listen=""
+  log "Configuring Nginx fallback and ACME webroot"
+  if [[ "${NGINX_PREEXISTING}" == "1" && -e "${NGINX_DEFAULT_SITE}" && ! -f "${TROJAN_NGINX_CONFIG}" ]]; then
+    die "Existing Nginx default site detected. Remove or migrate it before using the automated Trojan deployment."
+  fi
+
+  install -d -m 755 -o root -g root "${TROJAN_WEB_ROOT}"
+  if [[ ! -f "${TROJAN_WEB_ROOT}/index.html" ]]; then
+    cat > "${TROJAN_WEB_ROOT}/index.html" <<EOF
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Welcome</title></head>
+<body><h1>Welcome</h1><p>This site is online.</p></body>
+</html>
+EOF
+    chmod 644 "${TROJAN_WEB_ROOT}/index.html"
+  fi
+
+  if [[ -f "${TROJAN_NGINX_CONFIG}" ]]; then
+    NGINX_CONFIG_BACKUP_FILE="${TROJAN_NGINX_CONFIG}.bak.$(date +%Y%m%d%H%M%S)"
+    cp -p "${TROJAN_NGINX_CONFIG}" "${NGINX_CONFIG_BACKUP_FILE}"
+    chmod 600 "${NGINX_CONFIG_BACKUP_FILE}"
+  fi
+  NGINX_CONFIG_CHANGED="1"
+
+  if [[ -e "${NGINX_DEFAULT_SITE}" ]]; then
+    rm -f "${NGINX_DEFAULT_SITE}"
+    NGINX_DEFAULT_REMOVED="1"
+  fi
+
+  if has_ipv6_stack; then
+    ipv6_listen="    listen [::]:80 default_server;"
+  fi
+
+  cat > "${TROJAN_NGINX_CONFIG}" <<EOF
+server {
+    listen 127.0.0.1:${TROJAN_FALLBACK_PORT} default_server;
+    server_name _;
+    root ${TROJAN_WEB_ROOT};
+    index index.html;
+    server_tokens off;
+
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "no-referrer" always;
+    add_header X-Frame-Options "DENY" always;
+
+    location = /health {
+        default_type text/plain;
+        return 200 "ok\\n";
+    }
+    location / {
+        try_files \$uri \$uri/ /index.html;
+    }
+}
+
+server {
+    listen 80 default_server;
+${ipv6_listen}
+    server_name ${DOMAIN};
+    root ${TROJAN_WEB_ROOT};
+
+    location ^~ /.well-known/acme-challenge/ {
+        default_type text/plain;
+        try_files \$uri =404;
+    }
+    location / {
+        return 301 https://${DOMAIN}\$request_uri;
+    }
+}
+EOF
+  chmod 644 "${TROJAN_NGINX_CONFIG}"
+  nginx -t >/dev/null
+  systemctl enable nginx >/dev/null
+  systemctl restart nginx
+  systemctl is-active --quiet nginx || die "Nginx failed to start."
+}
+
+issue_trojan_certificate() {
+  local contact_args=(--register-unsafely-without-email)
+  if [[ -n "${ACME_EMAIL}" ]]; then
+    contact_args=(--email "${ACME_EMAIL}")
+  fi
+
+  log "Requesting or reusing a Let's Encrypt certificate for ${DOMAIN}"
+  certbot certonly \
+    --webroot \
+    --webroot-path "${TROJAN_WEB_ROOT}" \
+    --cert-name "${DOMAIN}" \
+    --domain "${DOMAIN}" \
+    --non-interactive \
+    --agree-tos \
+    --keep-until-expiring \
+    "${contact_args[@]}"
+
+  local lineage="/etc/letsencrypt/live/${DOMAIN}"
+  [[ -s "${lineage}/fullchain.pem" && -s "${lineage}/privkey.pem" ]] || die "Certbot completed without the expected certificate files."
+  openssl x509 -in "${lineage}/fullchain.pem" -noout -checkend 2592000 >/dev/null || die "The certificate expires in less than 30 days."
+}
+
+install_trojan_certificates() {
+  local lineage="/etc/letsencrypt/live/${DOMAIN}"
+  install -d -m 750 -o root -g "${XRAY_RUN_GROUP}" "${TROJAN_CERT_DIR}"
+  install -m 640 -o root -g "${XRAY_RUN_GROUP}" "${lineage}/fullchain.pem" "${TROJAN_CERT_DIR}/${DOMAIN}.fullchain.pem"
+  install -m 640 -o root -g "${XRAY_RUN_GROUP}" "${lineage}/privkey.pem" "${TROJAN_CERT_DIR}/${DOMAIN}.key.pem"
+}
+
+configure_trojan_certificate_renewal() {
+  log "Configuring and validating automatic certificate renewal"
+  install -d -m 755 -o root -g root "$(dirname "${TROJAN_RENEW_HOOK}")"
+  if [[ -f "${TROJAN_RENEW_HOOK}" ]]; then
+    RENEW_HOOK_BACKUP_FILE="${TROJAN_RENEW_HOOK}.bak.$(date +%Y%m%d%H%M%S)"
+    cp -p "${TROJAN_RENEW_HOOK}" "${RENEW_HOOK_BACKUP_FILE}"
+    chmod 600 "${RENEW_HOOK_BACKUP_FILE}"
+  fi
+  RENEW_HOOK_CHANGED="1"
+
+  cat > "${TROJAN_RENEW_HOOK}" <<EOF
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+DOMAIN="${DOMAIN}"
+XRAY_GROUP="${XRAY_RUN_GROUP}"
+XRAY_BIN="${XRAY_BIN}"
+CONFIG_FILE="${CONFIG_FILE}"
+CERT_DIR="${TROJAN_CERT_DIR}"
+
+if [[ " \${RENEWED_DOMAINS:-} " != *" \${DOMAIN} "* ]]; then
+  exit 0
+fi
+LINEAGE="\${RENEWED_LINEAGE:-/etc/letsencrypt/live/\${DOMAIN}}"
+install -d -m 750 -o root -g "\${XRAY_GROUP}" "\${CERT_DIR}"
+install -m 640 -o root -g "\${XRAY_GROUP}" "\${LINEAGE}/fullchain.pem" "\${CERT_DIR}/\${DOMAIN}.fullchain.pem"
+install -m 640 -o root -g "\${XRAY_GROUP}" "\${LINEAGE}/privkey.pem" "\${CERT_DIR}/\${DOMAIN}.key.pem"
+runuser -u "${XRAY_RUN_USER}" -- "\${XRAY_BIN}" run -test -config "\${CONFIG_FILE}" >/dev/null
+systemctl restart xray
+systemctl is-active --quiet xray
+EOF
+  chmod 700 "${TROJAN_RENEW_HOOK}"
+
+  systemctl enable --now certbot.timer >/dev/null
+  systemctl is-enabled --quiet certbot.timer || die "Failed to enable certbot.timer."
+  certbot renew --cert-name "${DOMAIN}" --dry-run >/dev/null
+}
+
+verify_trojan_fallback() {
+  local loopback="127.0.0.1"
+  if [[ "${XRAY_LISTEN}" == "::" ]]; then
+    loopback="[::1]"
+  fi
+  curl --noproxy '*' --fail --silent --show-error --max-time 10 \
+    --resolve "${DOMAIN}:${PORT}:${loopback}" \
+    "https://${DOMAIN}:${PORT}/" >/dev/null || die "Trojan TLS fallback HTTPS check failed."
+}
+
 check_listen_port_available() {
   local listeners
   listeners="$(ss -H -ltnp "sport = :${PORT}" 2>/dev/null || true)"
@@ -633,6 +934,12 @@ generate_reality_material() {
   [[ -n "${PRIVATE_KEY}" && -n "${PUBLIC_KEY}" ]] || die "Failed to generate Reality keys."
 }
 
+generate_trojan_material() {
+  log "Generating a strong Trojan password"
+  TROJAN_PASSWORD="$(openssl rand -hex 32)"
+  [[ "${#TROJAN_PASSWORD}" -eq 64 ]] || die "Failed to generate the Trojan password."
+}
+
 backup_existing_config() {
   local config_dir
   config_dir="$(dirname "${CONFIG_FILE}")"
@@ -647,7 +954,7 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as fh:
     config = json.load(fh)
 for inbound in config.get("inbounds", []):
-    if inbound.get("protocol") == "vless" and isinstance(inbound.get("port"), int):
+    if inbound.get("protocol") in {"vless", "trojan"} and isinstance(inbound.get("port"), int):
         print(inbound["port"])
         break
 PY
@@ -741,6 +1048,91 @@ EOF
   wait_for_xray_listener
 }
 
+write_trojan_xray_config() {
+  backup_existing_config
+
+  log "Writing Xray Trojan TLS config"
+  cat > "${CONFIG_FILE}" <<EOF
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "trojan-in",
+      "listen": "${XRAY_LISTEN}",
+      "port": ${PORT},
+      "protocol": "trojan",
+      "settings": {
+        "clients": [
+          {
+            "password": "${TROJAN_PASSWORD}",
+            "email": "${DOMAIN}"
+          }
+        ],
+        "fallbacks": [
+          {
+            "dest": "127.0.0.1:${TROJAN_FALLBACK_PORT}"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "tls",
+        "tlsSettings": {
+          "minVersion": "1.2",
+          "maxVersion": "1.3",
+          "alpn": [
+            "http/1.1"
+          ],
+          "certificates": [
+            {
+              "certificateFile": "${TROJAN_CERT_DIR}/${DOMAIN}.fullchain.pem",
+              "keyFile": "${TROJAN_CERT_DIR}/${DOMAIN}.key.pem"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    },
+    {
+      "protocol": "blackhole",
+      "tag": "block"
+    }
+  ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      {
+        "type": "field",
+        "ip": [
+          "geoip:private",
+          "169.254.169.254/32",
+          "fe80::/10"
+        ],
+        "outboundTag": "block"
+      }
+    ]
+  }
+}
+EOF
+
+  CONFIG_REPLACED="1"
+  chown "root:${XRAY_RUN_GROUP}" "$(dirname "${CONFIG_FILE}")" "${CONFIG_FILE}"
+  chmod 750 "$(dirname "${CONFIG_FILE}")"
+  chmod 640 "${CONFIG_FILE}"
+  runuser -u "${XRAY_RUN_USER}" -- "${XRAY_BIN}" run -test -config "${CONFIG_FILE}" >/dev/null
+  systemctl enable xray >/dev/null
+  systemctl restart xray
+  systemctl is-active --quiet xray || die "Xray failed to start."
+  wait_for_xray_listener
+}
+
 secure_existing_xray_config() {
   [[ -f "${CONFIG_FILE}" ]] || return
   chown "root:${XRAY_RUN_GROUP}" "$(dirname "${CONFIG_FILE}")" "${CONFIG_FILE}"
@@ -767,8 +1159,14 @@ configure_firewall() {
   ufw --force delete allow 22/tcp >/dev/null 2>&1 || true
   ufw limit OpenSSH >/dev/null 2>&1 || ufw limit 22/tcp >/dev/null 2>&1 || die "Failed to protect the SSH firewall rule."
   ufw allow "${PORT}/tcp" >/dev/null 2>&1 || die "Failed to open TCP port ${PORT} in UFW."
+  if [[ "${PROTOCOL}" == "trojan" ]]; then
+    ufw allow 80/tcp >/dev/null 2>&1 || die "Failed to open TCP port 80 for ACME renewal."
+  fi
   ufw --force enable >/dev/null 2>&1 || die "Failed to enable UFW."
   ufw status | grep -Eq "^${PORT}/tcp[[:space:]]+ALLOW" || die "UFW does not show TCP port ${PORT} as allowed."
+  if [[ "${PROTOCOL}" == "trojan" ]]; then
+    ufw status | grep -Eq '^80/tcp[[:space:]]+ALLOW' || die "UFW does not show TCP port 80 as allowed."
+  fi
 }
 
 remove_old_firewall_rule() {
@@ -784,6 +1182,8 @@ write_export_tool() {
   mkdir -p "${ARTIFACT_DIR}"
   cat > "${ARTIFACT_DIR}/vless_export_assets.py" <<'PY'
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 from __future__ import annotations
 
 import argparse
@@ -794,32 +1194,72 @@ import sys
 import urllib.parse
 from pathlib import Path
 
-VERSION = "1.4.2"
+try:
+    import qrcode
+except ImportError:  # pragma: no cover - optional dependency
+    qrcode = None
+
+
+VERSION = "1.5.0"
 DEFAULT_NODE_NAME = "vless-reality"
+DEFAULT_TROJAN_NODE_NAME = "trojan-tls"
 DEFAULT_FINGERPRINT = "chrome"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--vless-url", required=True)
-    parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--mixed-port", type=int, default=7890)
-    parser.add_argument("--controller", default="127.0.0.1:9090")
+    parser = argparse.ArgumentParser(
+        description="Export a VLESS Reality or Trojan TLS link to client assets."
+    )
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--node-url",
+        "--vless-url",
+        dest="node_url",
+        help="Full vless:// or trojan:// URL",
+    )
+    source.add_argument(
+        "--node-url-file",
+        type=Path,
+        help="Read the node URL from a file instead of the process command line",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=".",
+        help="Directory for generated files. Default: current directory",
+    )
+    parser.add_argument(
+        "--mixed-port",
+        type=int,
+        default=7890,
+        help="Mixed port written into the Clash YAML. Default: 7890",
+    )
+    parser.add_argument(
+        "--controller",
+        default="127.0.0.1:9090",
+        help="external-controller value for the Clash YAML. Default: 127.0.0.1:9090",
+    )
+    parser.add_argument(
+        "--skip-qr",
+        action="store_true",
+        help="Skip PNG QR generation even if qrcode is installed",
+    )
     parser.add_argument("-V", "--version", action="version", version=VERSION)
     return parser.parse_args()
 
 
-def parse_vless_link(link: str) -> dict[str, str | int]:
+def parse_node_link(link: str) -> dict[str, str | int]:
     link = link.strip()
-    if not link.lower().startswith("vless://"):
-        raise ValueError("Input is not a vless:// URL")
+    scheme = urllib.parse.urlparse(link).scheme.lower()
+    if scheme not in {"vless", "trojan"}:
+        raise ValueError("Input is not a vless:// or trojan:// URL")
 
+    default_name = DEFAULT_NODE_NAME if scheme == "vless" else DEFAULT_TROJAN_NODE_NAME
     if "#" in link:
         base, fragment = link.split("#", 1)
-        name = urllib.parse.unquote(fragment) or DEFAULT_NODE_NAME
+        name = urllib.parse.unquote(fragment) or default_name
     else:
         base = link
-        name = DEFAULT_NODE_NAME
+        name = default_name
 
     parsed = urllib.parse.urlparse(base)
     query = urllib.parse.parse_qs(parsed.query)
@@ -827,39 +1267,87 @@ def parse_vless_link(link: str) -> dict[str, str | int]:
     def q1(key: str, default: str = "") -> str:
         return query.get(key, [default])[0]
 
-    uuid = parsed.username or ""
     server = parsed.hostname or ""
     port = parsed.port or 0
+    if not server or not port:
+        raise ValueError("Missing server or port")
     sni = q1("sni", q1("servername", ""))
-    fingerprint = q1("fp", DEFAULT_FINGERPRINT)
-    public_key = q1("pbk", q1("public-key", ""))
-    short_id = q1("sid", q1("short-id", ""))
-    flow = q1("flow", "xtls-rprx-vision")
+    if scheme == "vless":
+        uuid = urllib.parse.unquote(parsed.username or "")
+        network = q1("type", q1("network", "tcp")).lower()
+        security = q1("security", "reality").lower()
+        fingerprint = q1("fp", DEFAULT_FINGERPRINT)
+        public_key = q1("pbk", q1("public-key", ""))
+        short_id = q1("sid", q1("short-id", ""))
+        flow = q1("flow", "xtls-rprx-vision")
+        if not uuid or not sni or not public_key or not short_id:
+            raise ValueError("The VLESS URL is missing required Reality fields")
+        if network != "tcp" or security != "reality":
+            raise ValueError("Only VLESS Reality over TCP is supported")
+        return {
+            "name": name,
+            "protocol": "vless",
+            "uuid": uuid,
+            "server": server,
+            "port": port,
+            "network": network,
+            "security": security,
+            "sni": sni,
+            "fingerprint": fingerprint,
+            "public_key": public_key,
+            "short_id": short_id,
+            "flow": flow,
+        }
 
-    if not uuid or not server or not port or not sni or not public_key or not short_id:
-        raise ValueError("The VLESS URL is missing required Reality fields")
-
+    password = urllib.parse.unquote(parsed.username or "")
+    if not password or not sni:
+        raise ValueError("The Trojan URL is missing password or sni")
     return {
         "name": name,
-        "uuid": uuid,
+        "protocol": "trojan",
+        "password": password,
         "server": server,
         "port": port,
         "sni": sni,
-        "fingerprint": fingerprint,
-        "public_key": public_key,
-        "short_id": short_id,
-        "flow": flow,
+        "fingerprint": q1("fp", DEFAULT_FINGERPRINT),
     }
 
 
-def format_url_host(server: str) -> str:
+def build_node_url(node: dict[str, str | int]) -> str:
+    if node["protocol"] == "vless":
+        scheme = "vless"
+        userinfo = str(node["uuid"])
+        query_values = {
+            "encryption": "none",
+            "type": node["network"],
+            "security": node["security"],
+            "sni": node["sni"],
+            "fp": node["fingerprint"],
+            "flow": node["flow"],
+            "pbk": node["public_key"],
+            "sid": node["short_id"],
+        }
+    else:
+        scheme = "trojan"
+        userinfo = urllib.parse.quote(str(node["password"]), safe="")
+        query_values = {
+            "security": "tls",
+            "sni": node["sni"],
+            "type": "tcp",
+            "fp": node["fingerprint"],
+        }
+    query = urllib.parse.urlencode(query_values)
+    fragment = urllib.parse.quote(str(node["name"]), safe="")
+    server = str(node["server"])
     try:
         address = ipaddress.ip_address(server)
     except ValueError:
-        return server
-    if address.version == 6:
-        return f"[{server}]"
-    return server
+        url_server = server
+    else:
+        url_server = f"[{server}]" if address.version == 6 else server
+    return (
+        f"{scheme}://{userinfo}@{url_server}:{node['port']}?{query}#{fragment}"
+    )
 
 
 def build_clash_server_direct_rule(server: str) -> str:
@@ -885,7 +1373,33 @@ def build_clashverge_yaml(node: dict[str, str | int], mixed_port: int, controlle
     name = str(node["name"])
     server_direct_rule = build_clash_server_direct_rule(str(node["server"]))
     route_exclude_block = build_clash_route_exclude(str(node["server"]))
-    return f"""# Generated by install.sh
+    if node["protocol"] == "vless":
+        proxy = f'''    type: vless
+    server: "{node["server"]}"
+    port: {node["port"]}
+    uuid: {node["uuid"]}
+    network: tcp
+    tls: true
+    udp: true
+    servername: "{node["sni"]}"
+    client-fingerprint: "{node["fingerprint"]}"
+    flow: "{node["flow"]}"
+    reality-opts:
+      public-key: "{node["public_key"]}"
+      short-id: "{node["short_id"]}"'''
+    else:
+        proxy = f'''    type: trojan
+    server: "{node["server"]}"
+    port: {node["port"]}
+    password: "{node["password"]}"
+    sni: "{node["sni"]}"
+    client-fingerprint: "{node["fingerprint"]}"
+    tls: true
+    udp: true
+    alpn:
+      - http/1.1
+    skip-cert-verify: false'''
+    return f"""# Generated by vless_export_assets.py
 mixed-port: {mixed_port}
 allow-lan: false
 bind-address: 127.0.0.1
@@ -953,19 +1467,7 @@ rule-providers:
 
 proxies:
   - name: "{name}"
-    type: vless
-    server: "{node["server"]}"
-    port: {node["port"]}
-    uuid: {node["uuid"]}
-    network: tcp
-    tls: true
-    udp: true
-    servername: "{node["sni"]}"
-    client-fingerprint: "{node["fingerprint"]}"
-    flow: "{node["flow"]}"
-    reality-opts:
-      public-key: "{node["public_key"]}"
-      short-id: "{node["short_id"]}"
+{proxy}
 
 proxy-groups:
   - name: "节点选择"
@@ -1063,6 +1565,10 @@ rules:
 
 def build_shadowrocket_conf(node: dict[str, str | int]) -> str:
     name = str(node["name"])
+    if node["protocol"] == "vless":
+        proxy = f"{name} = vless, {node['server']}, {node['port']}, username={node['uuid']}, tls=true, sni={node['sni']}, xtls=1, public-key={node['public_key']}, short-id={node['short_id']}, flow={node['flow']}, fingerprint={node['fingerprint']}"
+    else:
+        proxy = f"{name} = trojan, {node['server']}, {node['port']}, password={node['password']}, sni={node['sni']}, tls=true, skip-cert-verify=false, udp-relay=true, fingerprint={node['fingerprint']}"
     return f"""[General]
 bypass-system = true
 skip-proxy = 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, localhost, *.local
@@ -1071,7 +1577,7 @@ dns-server = 223.5.5.5, 119.29.29.29, 1.1.1.1, 8.8.8.8
 ipv6 = true
 
 [Proxy]
-{name} = vless, {node["server"]}, {node["port"]}, username={node["uuid"]}, tls=true, sni={node["sni"]}, xtls=1, public-key={node["public_key"]}, short-id={node["short_id"]}, flow={node["flow"]}, fingerprint={node["fingerprint"]}
+{proxy}
 
 [Proxy Group]
 PROXY = select, {name}, DIRECT
@@ -1090,54 +1596,88 @@ def clash_filename(node: dict[str, str | int]) -> str:
     return f"{slugify(str(node['server']))}.yaml"
 
 
+def write_qr_png(data: str, target: Path) -> None:
+    if qrcode is None:
+        return
+    image = qrcode.make(data)
+    image.save(target)
+
+
 def main() -> int:
     args = parse_args()
-    node = parse_vless_link(args.vless_url)
-    output_dir = Path(args.output_dir)
+    node_url = (
+        args.node_url_file.read_text(encoding="utf-8")
+        if args.node_url_file
+        else args.node_url
+    )
+    node = parse_node_link(node_url)
+    output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    normalized_link = build_node_url(node)
     clash = build_clashverge_yaml(node, args.mixed_port, args.controller)
+    shadowrocket = build_shadowrocket_conf(node)
     named_clash = clash_filename(node)
+    node_link_filename = f"node.{node['protocol']}.txt"
     metadata = dict(node)
     metadata["clash_yaml"] = named_clash
+    metadata["node_link"] = node_link_filename
 
-    (output_dir / "node.vless.txt").write_text(args.vless_url + "\n", encoding="utf-8")
-    (output_dir / named_clash).write_text(clash, encoding="utf-8")
-    (output_dir / "shadowrocket.conf").write_text(
-        build_shadowrocket_conf(node), encoding="utf-8"
-    )
-    (output_dir / "metadata.json").write_text(
-        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
+    files = {
+        node_link_filename: normalized_link,
+        named_clash: clash,
+        "shadowrocket.conf": shadowrocket,
+        "metadata.json": json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+    }
+
+    for filename, content in files.items():
+        (output_dir / filename).write_text(content, encoding="utf-8")
+
+    if not args.skip_qr and qrcode is not None:
+        write_qr_png(normalized_link, output_dir / "shadowrocket-node.png")
+
+    print(f"Generated assets in: {output_dir}")
+    print(f"  - {output_dir / node_link_filename}")
+    print(f"  - {output_dir / named_clash}")
+    print(f"  - {output_dir / 'shadowrocket.conf'}")
+    print(f"  - {output_dir / 'metadata.json'}")
+    if not args.skip_qr and qrcode is not None:
+        print(f"  - {output_dir / 'shadowrocket-node.png'}")
+    elif not args.skip_qr:
+        print("Skipped QR generation because the qrcode package is not installed.")
+
     return 0
 
 
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except Exception as exc:
+    except Exception as exc:  # pragma: no cover - CLI guard
         print(f"Error: {exc}", file=sys.stderr)
         raise SystemExit(1)
 PY
   chmod +x "${ARTIFACT_DIR}/vless_export_assets.py"
 }
 
-build_vless_url() {
-  VLESS_URL="$(
-    UUID="${UUID}" \
-    SERVER="${PUBLIC_IP}" \
+build_node_url() {
+  NODE_URL="$(
+    PROTOCOL="${PROTOCOL}" \
+    UUID="${UUID:-}" \
+    PASSWORD="${TROJAN_PASSWORD:-}" \
+    SERVER="${EXPORT_SERVER}" \
     PORT="${PORT}" \
     SNI="${SNI}" \
     FINGERPRINT="${CLIENT_FINGERPRINT}" \
     FLOW="xtls-rprx-vision" \
-    PBK="${PUBLIC_KEY}" \
-    SID="${SHORT_ID}" \
+    PBK="${PUBLIC_KEY:-}" \
+    SID="${SHORT_ID:-}" \
     NODE_NAME="${NODE_NAME}" \
     python3 - <<'PY'
 import ipaddress
 import os
 import urllib.parse
 
+protocol = os.environ["PROTOCOL"]
 server = os.environ["SERVER"]
 try:
     address = ipaddress.ip_address(server)
@@ -1146,34 +1686,55 @@ except ValueError:
 else:
     url_server = f"[{server}]" if address.version == 6 else server
 
-params = {
-    "encryption": "none",
-    "type": "tcp",
-    "security": "reality",
-    "sni": os.environ["SNI"],
-    "fp": os.environ["FINGERPRINT"],
-    "flow": os.environ["FLOW"],
-    "pbk": os.environ["PBK"],
-    "sid": os.environ["SID"],
-}
+if protocol == "reality":
+    scheme = "vless"
+    userinfo = os.environ["UUID"]
+    params = {
+        "encryption": "none",
+        "type": "tcp",
+        "security": "reality",
+        "sni": os.environ["SNI"],
+        "fp": os.environ["FINGERPRINT"],
+        "flow": os.environ["FLOW"],
+        "pbk": os.environ["PBK"],
+        "sid": os.environ["SID"],
+    }
+else:
+    scheme = "trojan"
+    userinfo = urllib.parse.quote(os.environ["PASSWORD"], safe="")
+    params = {
+        "security": "tls",
+        "sni": os.environ["SNI"],
+        "type": "tcp",
+        "fp": os.environ["FINGERPRINT"],
+    }
 query = urllib.parse.urlencode(params)
 fragment = urllib.parse.quote(os.environ["NODE_NAME"], safe="")
 print(
-    f"vless://{os.environ['UUID']}@{url_server}:{os.environ['PORT']}?{query}#{fragment}"
+    f"{scheme}://{userinfo}@{url_server}:{os.environ['PORT']}?{query}#{fragment}"
 )
 PY
   )"
 }
 
 generate_assets() {
+  local node_url_file=""
   log "Generating export files"
   mkdir -p "${ARTIFACT_DIR}"
   chmod 700 "${ARTIFACT_DIR}"
-  build_vless_url
+  build_node_url
   write_export_tool
+  node_url_file="$(mktemp "${ARTIFACT_DIR}/.node-url.XXXXXX")"
+  NODE_URL_TEMP_FILE="${node_url_file}"
+  NODE_URL_TEMP_CREATED="1"
+  printf '%s\n' "${NODE_URL}" > "${node_url_file}"
+  chmod 600 "${node_url_file}"
   python3 "${ARTIFACT_DIR}/vless_export_assets.py" \
-    --vless-url "${VLESS_URL}" \
+    --node-url-file "${node_url_file}" \
     --output-dir "${ARTIFACT_DIR}"
+  rm -f "${node_url_file}"
+  NODE_URL_TEMP_CREATED="0"
+  NODE_URL_TEMP_FILE=""
   CLASH_YAML_NAME="$(
     python3 - "${ARTIFACT_DIR}/metadata.json" <<'PY'
 import json
@@ -1183,32 +1744,64 @@ with open(sys.argv[1], encoding="utf-8") as fh:
     print(json.load(fh)["clash_yaml"])
 PY
   )"
+  NODE_LINK_NAME="$(
+    python3 - "${ARTIFACT_DIR}/metadata.json" <<'PY'
+import json
+import sys
 
-  printf '%s\n' "${VLESS_URL}" > "${ARTIFACT_DIR}/node.vless.txt"
+with open(sys.argv[1], encoding="utf-8") as fh:
+    print(json.load(fh)["node_link"])
+PY
+  )"
+
+  printf '%s\n' "${NODE_URL}" > "${ARTIFACT_DIR}/${NODE_LINK_NAME}"
 
   if [[ "${SKIP_QR}" != "1" ]] && command_exists qrencode; then
-    qrencode -o "${ARTIFACT_DIR}/shadowrocket-node.png" "${VLESS_URL}"
+    printf '%s' "${NODE_URL}" | qrencode -o "${ARTIFACT_DIR}/shadowrocket-node.png"
   fi
 
   chmod 700 "${ARTIFACT_DIR}/vless_export_assets.py"
-  find "${ARTIFACT_DIR}" -maxdepth 1 -type f ! -name vless_export_assets.py -exec chmod 600 {} +
+  chmod 600 \
+    "${ARTIFACT_DIR}/${NODE_LINK_NAME}" \
+    "${ARTIFACT_DIR}/${CLASH_YAML_NAME}" \
+    "${ARTIFACT_DIR}/shadowrocket.conf" \
+    "${ARTIFACT_DIR}/metadata.json"
+  if [[ -f "${ARTIFACT_DIR}/shadowrocket-node.png" ]]; then
+    chmod 600 "${ARTIFACT_DIR}/shadowrocket-node.png"
+  fi
 
   cat > "${ARTIFACT_DIR}/README.txt" <<EOF
 ${SCRIPT_NAME} v${SCRIPT_VERSION}
 
-VLESS Reality is ready.
+${PROTOCOL} deployment is ready.
 
-Server endpoint: ${PUBLIC_IP}
+Server endpoint: ${EXPORT_SERVER}
+Public IP: ${PUBLIC_IP}
 Endpoint family: ${PUBLIC_IP_FAMILY}
 Port: ${PORT}
 Node name: ${NODE_NAME}
-SNI: ${SNI}
+SNI / TLS domain: ${SNI}
+EOF
+
+  if [[ "${PROTOCOL}" == "reality" ]]; then
+    cat >> "${ARTIFACT_DIR}/README.txt" <<EOF
+
 Reality dest: ${DEST_HOST}:${DEST_PORT}
 Public key: ${PUBLIC_KEY}
 Short ID: ${SHORT_ID}
+EOF
+  else
+    cat >> "${ARTIFACT_DIR}/README.txt" <<EOF
+
+Fallback: 127.0.0.1:${TROJAN_FALLBACK_PORT}
+Certificate renewal: certbot.timer
+EOF
+  fi
+
+  cat >> "${ARTIFACT_DIR}/README.txt" <<EOF
 
 Generated files:
-  ${ARTIFACT_DIR}/node.vless.txt
+  ${ARTIFACT_DIR}/${NODE_LINK_NAME}
   ${ARTIFACT_DIR}/${CLASH_YAML_NAME}
   ${ARTIFACT_DIR}/shadowrocket.conf
   ${ARTIFACT_DIR}/metadata.json
@@ -1223,7 +1816,7 @@ EOF
   cat >> "${ARTIFACT_DIR}/README.txt" <<EOF
 
 Download with sz:
-  sz ${ARTIFACT_DIR}/node.vless.txt
+  sz ${ARTIFACT_DIR}/${NODE_LINK_NAME}
   sz ${ARTIFACT_DIR}/${CLASH_YAML_NAME}
   sz ${ARTIFACT_DIR}/shadowrocket.conf
   sz ${ARTIFACT_DIR}/metadata.json
@@ -1231,7 +1824,7 @@ Download with sz:
 
 Notes:
   - sz requires a ZMODEM-capable terminal such as Xshell, SecureCRT, or MobaXterm.
-  - shadowrocket-node.png is a VLESS QR code for direct Shadowrocket scanning.
+  - shadowrocket-node.png is a ${PROTOCOL} QR code for direct Shadowrocket scanning.
   - ${CLASH_YAML_NAME} is intended for Clash Verge, Clash Mi, or Karing, and Clash Verge displays the server address as the profile name.
   - install.sh automatically runs: sz ${ARTIFACT_DIR}/${CLASH_YAML_NAME}
 EOF
@@ -1241,13 +1834,15 @@ print_summary() {
   log "Installation complete"
   cat <<EOF
 Script version : ${SCRIPT_VERSION}
+Protocol       : ${PROTOCOL}
 Xray service   : $(systemctl is-active xray)
 Config file    : ${CONFIG_FILE}
 Artifact dir   : ${ARTIFACT_DIR}
 Auto update    : $([[ "${AUTO_UPDATE_XRAY}" == "1" ]] && printf 'xray-auto-update.timer at %s' "${AUTO_UPDATE_TIME}" || printf 'disabled')
+Cert renewal   : $([[ "${PROTOCOL}" == "trojan" ]] && printf 'certbot.timer' || printf 'not applicable')
 Auto sz Clash  : $([[ "${SKIP_SZ}" == "1" ]] && printf 'disabled' || printf 'enabled')
 
-VLESS URL file : ${ARTIFACT_DIR}/node.vless.txt
+Node URL file  : ${ARTIFACT_DIR}/${NODE_LINK_NAME}
 
 Quick download:
   sz ${ARTIFACT_DIR}/*
@@ -1314,7 +1909,7 @@ Auto update    : $([[ "${AUTO_UPDATE_XRAY}" == "1" ]] && printf 'xray-auto-updat
 Auto sz Clash  : $([[ "${SKIP_SZ}" == "1" ]] && printf 'disabled' || printf 'enabled')
 
 Existing Xray config was not replaced.
-Re-run with --force-overwrite to generate a new VLESS Reality config and export assets.
+Re-run with --force-overwrite to generate a new ${PROTOCOL} config and export assets.
 EOF
 }
 
@@ -1322,8 +1917,9 @@ main() {
   parse_args "$@"
   need_root
   detect_os
-  ensure_defaults
+  detect_existing_nginx
   validate_args
+  ensure_defaults
   confirm_plan
   install_dependencies
   ensure_required_commands
@@ -1339,11 +1935,26 @@ main() {
     return
   fi
   detect_public_ip
-  validate_reality_target
+  EXPORT_SERVER="${PUBLIC_IP}"
+  if [[ "${PROTOCOL}" == "trojan" ]]; then
+    EXPORT_SERVER="${DOMAIN}"
+  fi
   check_listen_port_available
-  generate_reality_material
   configure_firewall
-  write_xray_config
+  if [[ "${PROTOCOL}" == "reality" ]]; then
+    validate_reality_target
+    generate_reality_material
+    write_xray_config
+  else
+    validate_trojan_domain_dns
+    configure_trojan_fallback
+    issue_trojan_certificate
+    install_trojan_certificates
+    generate_trojan_material
+    write_trojan_xray_config
+    configure_trojan_certificate_renewal
+    verify_trojan_fallback
+  fi
   configure_xray_auto_update
   generate_assets
   print_summary

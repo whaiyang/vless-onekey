@@ -17,16 +17,28 @@ except ImportError:  # pragma: no cover - optional dependency
     qrcode = None
 
 
-VERSION = "1.4.2"
+VERSION = "1.5.0"
 DEFAULT_NODE_NAME = "vless-reality"
+DEFAULT_TROJAN_NODE_NAME = "trojan-tls"
 DEFAULT_FINGERPRINT = "chrome"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Export a VLESS Reality link to Clash Verge and Shadowrocket assets."
+        description="Export a VLESS Reality or Trojan TLS link to client assets."
     )
-    parser.add_argument("--vless-url", required=True, help="Full vless:// URL")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--node-url",
+        "--vless-url",
+        dest="node_url",
+        help="Full vless:// or trojan:// URL",
+    )
+    source.add_argument(
+        "--node-url-file",
+        type=Path,
+        help="Read the node URL from a file instead of the process command line",
+    )
     parser.add_argument(
         "--output-dir",
         default=".",
@@ -52,17 +64,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def parse_vless_link(link: str) -> dict[str, str | int]:
+def parse_node_link(link: str) -> dict[str, str | int]:
     link = link.strip()
-    if not link.lower().startswith("vless://"):
-        raise ValueError("Input is not a vless:// URL")
+    scheme = urllib.parse.urlparse(link).scheme.lower()
+    if scheme not in {"vless", "trojan"}:
+        raise ValueError("Input is not a vless:// or trojan:// URL")
 
+    default_name = DEFAULT_NODE_NAME if scheme == "vless" else DEFAULT_TROJAN_NODE_NAME
     if "#" in link:
         base, fragment = link.split("#", 1)
-        name = urllib.parse.unquote(fragment) or DEFAULT_NODE_NAME
+        name = urllib.parse.unquote(fragment) or default_name
     else:
         base = link
-        name = DEFAULT_NODE_NAME
+        name = default_name
 
     parsed = urllib.parse.urlparse(base)
     query = urllib.parse.parse_qs(parsed.query)
@@ -70,50 +84,57 @@ def parse_vless_link(link: str) -> dict[str, str | int]:
     def q1(key: str, default: str = "") -> str:
         return query.get(key, [default])[0]
 
-    uuid = parsed.username or ""
     server = parsed.hostname or ""
     port = parsed.port or 0
-    security = q1("security", "reality").lower()
-    network = q1("type", q1("network", "tcp")).lower()
-    sni = q1("sni", q1("servername", ""))
-    fingerprint = q1("fp", DEFAULT_FINGERPRINT)
-    public_key = q1("pbk", q1("public-key", ""))
-    short_id = q1("sid", q1("short-id", ""))
-    flow = q1("flow", "xtls-rprx-vision")
-
-    if not uuid:
-        raise ValueError("Missing UUID")
     if not server or not port:
         raise ValueError("Missing server or port")
-    if network != "tcp":
-        raise ValueError(f"Only tcp network is supported, got: {network}")
-    if security != "reality":
-        raise ValueError(f"Only reality security is supported, got: {security}")
-    if not sni:
-        raise ValueError("Missing sni/servername")
-    if not public_key:
-        raise ValueError("Missing reality public key")
-    if not short_id:
-        raise ValueError("Missing reality short-id")
+    sni = q1("sni", q1("servername", ""))
+    if scheme == "vless":
+        uuid = urllib.parse.unquote(parsed.username or "")
+        network = q1("type", q1("network", "tcp")).lower()
+        security = q1("security", "reality").lower()
+        fingerprint = q1("fp", DEFAULT_FINGERPRINT)
+        public_key = q1("pbk", q1("public-key", ""))
+        short_id = q1("sid", q1("short-id", ""))
+        flow = q1("flow", "xtls-rprx-vision")
+        if not uuid or not sni or not public_key or not short_id:
+            raise ValueError("The VLESS URL is missing required Reality fields")
+        if network != "tcp" or security != "reality":
+            raise ValueError("Only VLESS Reality over TCP is supported")
+        return {
+            "name": name,
+            "protocol": "vless",
+            "uuid": uuid,
+            "server": server,
+            "port": port,
+            "network": network,
+            "security": security,
+            "sni": sni,
+            "fingerprint": fingerprint,
+            "public_key": public_key,
+            "short_id": short_id,
+            "flow": flow,
+        }
 
+    password = urllib.parse.unquote(parsed.username or "")
+    if not password or not sni:
+        raise ValueError("The Trojan URL is missing password or sni")
     return {
         "name": name,
-        "uuid": uuid,
+        "protocol": "trojan",
+        "password": password,
         "server": server,
         "port": port,
-        "network": network,
-        "security": security,
         "sni": sni,
-        "fingerprint": fingerprint,
-        "public_key": public_key,
-        "short_id": short_id,
-        "flow": flow,
+        "fingerprint": q1("fp", DEFAULT_FINGERPRINT),
     }
 
 
-def build_vless_url(node: dict[str, str | int]) -> str:
-    query = urllib.parse.urlencode(
-        {
+def build_node_url(node: dict[str, str | int]) -> str:
+    if node["protocol"] == "vless":
+        scheme = "vless"
+        userinfo = str(node["uuid"])
+        query_values = {
             "encryption": "none",
             "type": node["network"],
             "security": node["security"],
@@ -123,7 +144,16 @@ def build_vless_url(node: dict[str, str | int]) -> str:
             "pbk": node["public_key"],
             "sid": node["short_id"],
         }
-    )
+    else:
+        scheme = "trojan"
+        userinfo = urllib.parse.quote(str(node["password"]), safe="")
+        query_values = {
+            "security": "tls",
+            "sni": node["sni"],
+            "type": "tcp",
+            "fp": node["fingerprint"],
+        }
+    query = urllib.parse.urlencode(query_values)
     fragment = urllib.parse.quote(str(node["name"]), safe="")
     server = str(node["server"])
     try:
@@ -133,8 +163,7 @@ def build_vless_url(node: dict[str, str | int]) -> str:
     else:
         url_server = f"[{server}]" if address.version == 6 else server
     return (
-        f"vless://{node['uuid']}@{url_server}:{node['port']}"
-        f"?{query}#{fragment}"
+        f"{scheme}://{userinfo}@{url_server}:{node['port']}?{query}#{fragment}"
     )
 
 
@@ -161,6 +190,32 @@ def build_clashverge_yaml(node: dict[str, str | int], mixed_port: int, controlle
     name = str(node["name"])
     server_direct_rule = build_clash_server_direct_rule(str(node["server"]))
     route_exclude_block = build_clash_route_exclude(str(node["server"]))
+    if node["protocol"] == "vless":
+        proxy = f'''    type: vless
+    server: "{node["server"]}"
+    port: {node["port"]}
+    uuid: {node["uuid"]}
+    network: tcp
+    tls: true
+    udp: true
+    servername: "{node["sni"]}"
+    client-fingerprint: "{node["fingerprint"]}"
+    flow: "{node["flow"]}"
+    reality-opts:
+      public-key: "{node["public_key"]}"
+      short-id: "{node["short_id"]}"'''
+    else:
+        proxy = f'''    type: trojan
+    server: "{node["server"]}"
+    port: {node["port"]}
+    password: "{node["password"]}"
+    sni: "{node["sni"]}"
+    client-fingerprint: "{node["fingerprint"]}"
+    tls: true
+    udp: true
+    alpn:
+      - http/1.1
+    skip-cert-verify: false'''
     return f"""# Generated by vless_export_assets.py
 mixed-port: {mixed_port}
 allow-lan: false
@@ -229,19 +284,7 @@ rule-providers:
 
 proxies:
   - name: "{name}"
-    type: vless
-    server: "{node["server"]}"
-    port: {node["port"]}
-    uuid: {node["uuid"]}
-    network: tcp
-    tls: true
-    udp: true
-    servername: "{node["sni"]}"
-    client-fingerprint: "{node["fingerprint"]}"
-    flow: "{node["flow"]}"
-    reality-opts:
-      public-key: "{node["public_key"]}"
-      short-id: "{node["short_id"]}"
+{proxy}
 
 proxy-groups:
   - name: "节点选择"
@@ -339,6 +382,10 @@ rules:
 
 def build_shadowrocket_conf(node: dict[str, str | int]) -> str:
     name = str(node["name"])
+    if node["protocol"] == "vless":
+        proxy = f"{name} = vless, {node['server']}, {node['port']}, username={node['uuid']}, tls=true, sni={node['sni']}, xtls=1, public-key={node['public_key']}, short-id={node['short_id']}, flow={node['flow']}, fingerprint={node['fingerprint']}"
+    else:
+        proxy = f"{name} = trojan, {node['server']}, {node['port']}, password={node['password']}, sni={node['sni']}, tls=true, skip-cert-verify=false, udp-relay=true, fingerprint={node['fingerprint']}"
     return f"""[General]
 bypass-system = true
 skip-proxy = 192.168.0.0/16, 10.0.0.0/8, 172.16.0.0/12, localhost, *.local
@@ -347,7 +394,7 @@ dns-server = 223.5.5.5, 119.29.29.29, 1.1.1.1, 8.8.8.8
 ipv6 = true
 
 [Proxy]
-{name} = vless, {node["server"]}, {node["port"]}, username={node["uuid"]}, tls=true, sni={node["sni"]}, xtls=1, public-key={node["public_key"]}, short-id={node["short_id"]}, flow={node["flow"]}, fingerprint={node["fingerprint"]}
+{proxy}
 
 [Proxy Group]
 PROXY = select, {name}, DIRECT
@@ -375,19 +422,26 @@ def write_qr_png(data: str, target: Path) -> None:
 
 def main() -> int:
     args = parse_args()
-    node = parse_vless_link(args.vless_url)
+    node_url = (
+        args.node_url_file.read_text(encoding="utf-8")
+        if args.node_url_file
+        else args.node_url
+    )
+    node = parse_node_link(node_url)
     output_dir = Path(args.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    normalized_vless = build_vless_url(node)
+    normalized_link = build_node_url(node)
     clash = build_clashverge_yaml(node, args.mixed_port, args.controller)
     shadowrocket = build_shadowrocket_conf(node)
     named_clash = clash_filename(node)
+    node_link_filename = f"node.{node['protocol']}.txt"
     metadata = dict(node)
     metadata["clash_yaml"] = named_clash
+    metadata["node_link"] = node_link_filename
 
     files = {
-        "node.vless.txt": normalized_vless,
+        node_link_filename: normalized_link,
         named_clash: clash,
         "shadowrocket.conf": shadowrocket,
         "metadata.json": json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
@@ -397,10 +451,10 @@ def main() -> int:
         (output_dir / filename).write_text(content, encoding="utf-8")
 
     if not args.skip_qr and qrcode is not None:
-        write_qr_png(normalized_vless, output_dir / "shadowrocket-node.png")
+        write_qr_png(normalized_link, output_dir / "shadowrocket-node.png")
 
     print(f"Generated assets in: {output_dir}")
-    print(f"  - {output_dir / 'node.vless.txt'}")
+    print(f"  - {output_dir / node_link_filename}")
     print(f"  - {output_dir / named_clash}")
     print(f"  - {output_dir / 'shadowrocket.conf'}")
     print(f"  - {output_dir / 'metadata.json'}")
