@@ -21,6 +21,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/i
 
 Trojan 模式会让 sing-box 监听 `443/tcp`，把普通 HTTPS 回落到仅本机监听的 Nginx `127.0.0.1:8080`，并在 `80/tcp` 使用 ACME webroot 完成签发和续签。域名的 A/AAAA 记录必须直接指向该服务器；脚本发现解析不包含服务器公网地址时会停止。
 
+Trojan 安装完成后还会发布带 48 个十六进制字符（192 bit）随机令牌的 HTTPS Clash 订阅。把 `/root/vless-export/subscription-url.txt` 中的地址作为 URL 配置导入 Clash Verge，配置卡片右键即可使用“更新”和“分享二维码”。订阅路径关闭访问日志和缓存；该 URL 本身等同访问凭据，不要公开。若不需要远程订阅，可传 `--skip-clash-subscription`。
+
 查看参数：
 
 ```bash
@@ -56,6 +58,8 @@ bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/i
   节点参数明细，方便手工排查。
 - `README.txt`
   服务器端生成结果说明。
+- `subscription-url.txt` 和 `subscription-qr.png`（Trojan）
+  给 Clash Verge 导入的 HTTPS 远程订阅地址及其二维码。远程配置卡片支持右键更新和分享二维码。
 
 ## 下载到本地
 
@@ -99,7 +103,7 @@ sz /root/vless-export/shadowrocket-node.png
 - 会自动优先使用公网 IPv4；如果服务器只有 IPv6，会自动回落到 IPv6 并导出对应配置。
 - `shadowrocket-node.png` 适合直接给 `Shadowrocket` 扫码。
 - `<服务器IP或域名>.yaml` 适合 `Clash Verge / Clash Mi / Karing` 导入。
-- Trojan 服务端强制 TLS 1.2/1.3，客户端配置保持证书校验开启。私网和云元数据地址默认阻断，本机 Nginx 回落通过一条仅匹配 `127.0.0.1` 来源的窄规则放行。
+- Trojan 服务端强制 TLS 1.2/1.3，客户端配置保持证书校验开启。私网和云元数据地址默认阻断；仅 `trojan-in` 到 `127.0.0.1:8080` 的 Nginx 回落连接被放行。
 
 查看自动更新状态：
 

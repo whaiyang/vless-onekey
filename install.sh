@@ -3,7 +3,7 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_NAME="install.sh"
-SCRIPT_VERSION="1.6.0"
+SCRIPT_VERSION="1.6.2"
 XRAY_INSTALLER_COMMIT="e741a4f56d368afbb9e5be3361b40c4552d3710d"
 XRAY_INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/${XRAY_INSTALLER_COMMIT}/install-release.sh"
 XRAY_AUTO_UPDATE_SCRIPT="/usr/local/sbin/xray-auto-update.sh"
@@ -31,6 +31,7 @@ SING_BOX_RUN_USER="sing-box"
 SING_BOX_RUN_GROUP="sing-box"
 TROJAN_CERT_DIR="${SING_BOX_CERT_DIR}"
 TROJAN_WEB_ROOT="/var/www/vless-onekey"
+TROJAN_SUBSCRIPTION_DIR="${TROJAN_WEB_ROOT}/sub"
 TROJAN_NGINX_CONFIG="/etc/nginx/conf.d/vless-onekey-fallback.conf"
 NGINX_DEFAULT_SITE="/etc/nginx/sites-enabled/default"
 TROJAN_RENEW_HOOK="/etc/letsencrypt/renewal-hooks/deploy/vless-onekey-sing-box-cert.sh"
@@ -48,6 +49,7 @@ SKIP_FIREWALL="0"
 SKIP_PACKAGES="0"
 SKIP_QR="0"
 SKIP_SZ="0"
+SKIP_CLASH_SUBSCRIPTION="0"
 SKIP_XRAY_UPGRADE="0"
 XRAY_BETA="0"
 AUTO_UPDATE_XRAY="0"
@@ -74,6 +76,8 @@ NODE_URL=""
 NODE_LINK_NAME=""
 NODE_URL_TEMP_CREATED="0"
 NODE_URL_TEMP_FILE=""
+SUBSCRIPTION_URL_FILE=""
+SUBSCRIPTION_QR_FILE=""
 EXPORT_SERVER=""
 NGINX_PREEXISTING="0"
 NGINX_CONFIG_BACKUP_FILE=""
@@ -125,6 +129,7 @@ Options:
   --skip-firewall           Do not change UFW rules
   --skip-packages           Skip apt package installation
   --skip-qr                 Do not generate Shadowrocket QR PNG
+  --skip-clash-subscription Trojan only: do not publish a token-protected HTTPS Clash subscription
   --skip-sz                 Do not auto-download the server-named Clash YAML with sz at the end
   -y, --yes                 Run non-interactively
   -V, --version             Show script version
@@ -365,6 +370,10 @@ parse_args() {
         SKIP_QR="1"
         shift
         ;;
+      --skip-clash-subscription)
+        SKIP_CLASH_SUBSCRIPTION="1"
+        shift
+        ;;
       --skip-sz)
         SKIP_SZ="1"
         shift
@@ -480,6 +489,7 @@ Artifact dir   : ${ARTIFACT_DIR}
 Skip firewall  : ${SKIP_FIREWALL}
 Skip packages  : ${SKIP_PACKAGES}
 Skip QR        : ${SKIP_QR}
+Clash subscribe: $([[ "${PROTOCOL}" == "trojan" && "${SKIP_CLASH_SUBSCRIPTION}" != "1" ]] && printf 'enabled' || printf 'disabled')
 Auto sz Clash  : $([[ "${SKIP_SZ}" == "1" ]] && printf 'no' || printf 'yes')
 EOF
 
@@ -564,7 +574,7 @@ install_dependencies() {
 }
 
 ensure_required_commands() {
-  local required=(curl openssl python3 awk sed ss timeout useradd mktemp sha256sum)
+  local required=(cmp curl openssl python3 awk sed ss timeout tr useradd mktemp sha256sum)
   local missing=()
   local cmd
   for cmd in "${required[@]}"; do
@@ -947,6 +957,17 @@ server {
         default_type text/plain;
         return 200 "ok\\n";
     }
+    location ~ "^/sub/[a-f0-9]{48}\\.yaml$" {
+        access_log off;
+        default_type text/yaml;
+        add_header Cache-Control "private, no-store" always;
+        add_header Content-Disposition 'inline; filename="${DOMAIN}.yaml"' always;
+        add_header X-Content-Type-Options "nosniff" always;
+        limit_except GET HEAD {
+            deny all;
+        }
+        try_files \$uri =404;
+    }
     location / {
         try_files \$uri \$uri/ /index.html;
     }
@@ -961,6 +982,10 @@ ${ipv6_listen}
     location ^~ /.well-known/acme-challenge/ {
         default_type text/plain;
         try_files \$uri =404;
+    }
+    location ~ "^/sub/[a-f0-9]{48}\\.yaml$" {
+        access_log off;
+        return 301 https://${DOMAIN}\$request_uri;
     }
     location / {
         return 301 https://${DOMAIN}\$request_uri;
@@ -1324,8 +1349,9 @@ PY
   "route": {
     "rules": [
       {
-        "source_ip_cidr": ["127.0.0.1/32"],
-        "ip_is_private": true,
+        "inbound": ["trojan-in"],
+        "ip_cidr": ["127.0.0.1/32"],
+        "port": [${TROJAN_FALLBACK_PORT}],
         "action": "route",
         "outbound": "direct"
       },
@@ -1445,7 +1471,7 @@ except ImportError:  # pragma: no cover - optional dependency
     qrcode = None
 
 
-VERSION = "1.6.0"
+VERSION = "1.6.2"
 DEFAULT_NODE_NAME = "vless-reality"
 DEFAULT_TROJAN_NODE_NAME = "trojan-tls"
 DEFAULT_FINGERPRINT = "chrome"
@@ -2075,6 +2101,78 @@ Notes:
 EOF
 }
 
+publish_clash_subscription() {
+  local source_yaml="${ARTIFACT_DIR}/${CLASH_YAML_NAME}"
+  local token_file="${ARTIFACT_DIR}/subscription-token"
+  local token=""
+  local subscription_authority="${DOMAIN}"
+  local subscription_url=""
+  local published_yaml=""
+  local verify_file=""
+
+  if [[ "${PROTOCOL}" != "trojan" || "${SKIP_CLASH_SUBSCRIPTION}" == "1" ]]; then
+    return
+  fi
+
+  log "Publishing token-protected Clash HTTPS subscription"
+  [[ -s "${source_yaml}" ]] || die "Clash YAML is missing at ${source_yaml}"
+
+  if [[ -s "${token_file}" ]]; then
+    token="$(tr -d '\r\n' < "${token_file}")"
+  else
+    token="$(openssl rand -hex 24)"
+  fi
+  [[ "${token}" =~ ^[a-f0-9]{48}$ ]] || die "Invalid Clash subscription token in ${token_file}"
+
+  printf '%s\n' "${token}" > "${token_file}"
+  chmod 600 "${token_file}"
+  install -d -m 750 -o root -g www-data "${TROJAN_SUBSCRIPTION_DIR}"
+  published_yaml="${TROJAN_SUBSCRIPTION_DIR}/${token}.yaml"
+  install -m 640 -o root -g www-data "${source_yaml}" "${published_yaml}"
+
+  if [[ "${PORT}" != "443" ]]; then
+    subscription_authority="${DOMAIN}:${PORT}"
+  fi
+  subscription_url="https://${subscription_authority}/sub/${token}.yaml"
+  SUBSCRIPTION_URL_FILE="${ARTIFACT_DIR}/subscription-url.txt"
+  printf '%s\n' "${subscription_url}" > "${SUBSCRIPTION_URL_FILE}"
+  chmod 600 "${SUBSCRIPTION_URL_FILE}"
+
+  if [[ "${SKIP_QR}" != "1" ]] && command_exists qrencode; then
+    SUBSCRIPTION_QR_FILE="${ARTIFACT_DIR}/subscription-qr.png"
+    printf '%s' "${subscription_url}" | qrencode -o "${SUBSCRIPTION_QR_FILE}"
+    chmod 600 "${SUBSCRIPTION_QR_FILE}"
+  fi
+
+  verify_file="$(mktemp /tmp/vless-subscription.XXXXXX.yaml)"
+  if ! curl --noproxy '*' --fail --silent --show-error --max-time 15 \
+    --resolve "${DOMAIN}:${PORT}:127.0.0.1" "${subscription_url}" -o "${verify_file}"; then
+    rm -f "${verify_file}"
+    die "Published Clash subscription is not reachable through Trojan HTTPS fallback"
+  fi
+  if ! cmp -s "${source_yaml}" "${verify_file}"; then
+    rm -f "${verify_file}"
+    die "Published Clash subscription does not match the generated YAML"
+  fi
+  rm -f "${verify_file}"
+
+  cat >> "${ARTIFACT_DIR}/README.txt" <<EOF
+
+Clash HTTPS subscription:
+  URL file: ${SUBSCRIPTION_URL_FILE}
+EOF
+  if [[ -n "${SUBSCRIPTION_QR_FILE}" ]]; then
+    cat >> "${ARTIFACT_DIR}/README.txt" <<EOF
+  QR file: ${SUBSCRIPTION_QR_FILE}
+EOF
+  fi
+  cat >> "${ARTIFACT_DIR}/README.txt" <<'EOF'
+
+Import the URL file content as a remote profile in Clash Verge. The remote profile supports Update and Share QR Code.
+Treat the URL as a credential because its random path grants access to the node configuration.
+EOF
+}
+
 print_summary() {
   log "Installation complete"
   cat <<EOF
@@ -2105,6 +2203,12 @@ EOF
 
   if [[ "${SKIP_QR}" != "1" ]] && [[ -f "${ARTIFACT_DIR}/shadowrocket-node.png" ]]; then
     printf 'Shadowrocket QR: %s\n' "${ARTIFACT_DIR}/shadowrocket-node.png"
+  fi
+  if [[ -n "${SUBSCRIPTION_URL_FILE}" ]]; then
+    printf 'Clash sub URL : %s\n' "${SUBSCRIPTION_URL_FILE}"
+  fi
+  if [[ -n "${SUBSCRIPTION_QR_FILE}" && -f "${SUBSCRIPTION_QR_FILE}" ]]; then
+    printf 'Clash sub QR  : %s\n' "${SUBSCRIPTION_QR_FILE}"
   fi
 }
 
@@ -2248,6 +2352,7 @@ main() {
     systemctl disable --now xray-auto-update.timer >/dev/null 2>&1 || true
   fi
   generate_assets
+  publish_clash_subscription
   print_summary
   send_clashverge_yaml
   remove_old_firewall_rule
