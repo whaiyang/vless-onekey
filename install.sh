@@ -3,7 +3,7 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_NAME="install.sh"
-SCRIPT_VERSION="1.6.2"
+SCRIPT_VERSION="1.7.0"
 XRAY_INSTALLER_COMMIT="e741a4f56d368afbb9e5be3361b40c4552d3710d"
 XRAY_INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/${XRAY_INSTALLER_COMMIT}/install-release.sh"
 XRAY_AUTO_UPDATE_SCRIPT="/usr/local/sbin/xray-auto-update.sh"
@@ -55,6 +55,8 @@ XRAY_BETA="0"
 AUTO_UPDATE_XRAY="0"
 AUTO_UPDATE_TIME="03:30:00"
 ALLOW_NON_443="0"
+ENABLE_BBR="1"
+NETWORK_TUNING_CONF="/etc/sysctl.d/99-vless-onekey-tuning.conf"
 
 OS_ID=""
 OS_VERSION_ID=""
@@ -128,6 +130,7 @@ Options:
   --auto-update-time TIME   Daily auto-update time in HH:MM or HH:MM:SS. Default: ${AUTO_UPDATE_TIME}
   --skip-firewall           Do not change UFW rules
   --skip-packages           Skip apt package installation
+  --skip-bbr                Skip TCP BBR and network buffer tuning (enabled by default)
   --skip-qr                 Do not generate Shadowrocket QR PNG
   --skip-clash-subscription Trojan only: do not publish a token-protected HTTPS Clash subscription
   --skip-sz                 Do not auto-download the server-named Clash YAML with sz at the end
@@ -366,6 +369,14 @@ parse_args() {
         SKIP_PACKAGES="1"
         shift
         ;;
+      --skip-bbr)
+        ENABLE_BBR="0"
+        shift
+        ;;
+      --enable-bbr)
+        ENABLE_BBR="1"
+        shift
+        ;;
       --skip-qr)
         SKIP_QR="1"
         shift
@@ -486,6 +497,7 @@ Config action  : ${config_action}
 Listen port    : ${PORT}
 Node name      : ${NODE_NAME}
 Artifact dir   : ${ARTIFACT_DIR}
+Network tuning : $([[ "${ENABLE_BBR}" == "1" ]] && printf 'BBR + 32MB TCP buffers + TFO' || printf 'disabled')
 Skip firewall  : ${SKIP_FIREWALL}
 Skip packages  : ${SKIP_PACKAGES}
 Skip QR        : ${SKIP_QR}
@@ -851,6 +863,69 @@ EOF
   systemctl daemon-reload
   systemctl enable --now xray-auto-update.timer >/dev/null
   systemctl is-enabled --quiet xray-auto-update.timer || die "Failed to enable xray-auto-update.timer."
+}
+
+configure_network_tuning() {
+  if [[ "${ENABLE_BBR}" != "1" ]]; then
+    log "Skipping network tuning and BBR configuration by request"
+    return
+  fi
+
+  log "Configuring network performance tuning (BBR and TCP buffer expansion)"
+
+  if command_exists modprobe; then
+    modprobe tcp_bbr 2>/dev/null || true
+  fi
+
+  if [[ -d /etc/modules-load.d ]]; then
+    echo "tcp_bbr" > /etc/modules-load.d/bbr.conf 2>/dev/null || true
+  elif [[ -f /etc/modules ]]; then
+    if ! grep -q "^tcp_bbr" /etc/modules 2>/dev/null; then
+      echo "tcp_bbr" >> /etc/modules 2>/dev/null || true
+    fi
+  fi
+
+  mkdir -p "$(dirname "${NETWORK_TUNING_CONF}")"
+  cat > "${NETWORK_TUNING_CONF}" <<'EOF'
+# TCP BBR 拥塞控制与 FQ 队列调度
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# TCP 窗口与缓冲区深度扩容 (针对大时延宽带与高并发，突破 BDP 吞吐上限)
+net.core.rmem_max = 33554432
+net.core.wmem_max = 33554432
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+net.ipv4.tcp_rmem = 4096 87380 33554432
+net.ipv4.tcp_wmem = 4096 65536 33554432
+
+# TCP 连接优化与 Fast Open (双向开启)
+net.ipv4.tcp_fastopen = 3
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 15
+net.ipv4.tcp_keepalive_probes = 5
+
+# 网络队列深度与连接表优化
+net.core.netdev_max_backlog = 10000
+net.core.somaxconn = 4096
+net.ipv4.tcp_max_syn_backlog = 4096
+EOF
+  chmod 644 "${NETWORK_TUNING_CONF}"
+
+  if command_exists sysctl; then
+    sysctl -p "${NETWORK_TUNING_CONF}" >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || true
+  fi
+
+  local current_cc
+  current_cc="$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || true)"
+  if [[ "${current_cc}" == "bbr" ]]; then
+    log "TCP BBR congestion control and network tuning successfully applied"
+  else
+    warn "TCP BBR module might not be supported by this kernel (current: ${current_cc:-unknown}). Sysctl buffer tuning applied."
+  fi
 }
 
 validate_reality_target() {
@@ -1232,6 +1307,9 @@ write_xray_config() {
           "shortIds": [
             "${SHORT_ID}"
           ]
+        },
+        "sockopt": {
+          "tcpFastOpen": true
         }
       }
     }
@@ -1239,7 +1317,12 @@ write_xray_config() {
   "outbounds": [
     {
       "protocol": "freedom",
-      "tag": "direct"
+      "tag": "direct",
+      "streamSettings": {
+        "sockopt": {
+          "tcpFastOpen": true
+        }
+      }
     },
     {
       "protocol": "blackhole",
@@ -1317,6 +1400,7 @@ PY
       "tag": "trojan-in",
       "listen": "${XRAY_LISTEN}",
       "listen_port": ${PORT},
+      "tcp_fast_open": true,
       "tcp_keep_alive": "10m",
       "tcp_keep_alive_interval": "30s",
       "users": [
@@ -1343,7 +1427,8 @@ PY
   "outbounds": [
     {
       "type": "direct",
-      "tag": "direct"
+      "tag": "direct",
+      "tcp_fast_open": true
     }
   ],
   "route": {
@@ -1471,7 +1556,7 @@ except ImportError:  # pragma: no cover - optional dependency
     qrcode = None
 
 
-VERSION = "1.6.2"
+VERSION = "1.7.0"
 DEFAULT_NODE_NAME = "vless-reality"
 DEFAULT_TROJAN_NODE_NAME = "trojan-tls"
 DEFAULT_FINGERPRINT = "chrome"
@@ -1652,6 +1737,7 @@ def build_clashverge_yaml(node: dict[str, str | int], mixed_port: int, controlle
     network: tcp
     tls: true
     udp: true
+    tfo: true
     servername: "{node["sni"]}"
     client-fingerprint: "{node["fingerprint"]}"
     flow: "{node["flow"]}"
@@ -1667,6 +1753,7 @@ def build_clashverge_yaml(node: dict[str, str | int], mixed_port: int, controlle
     client-fingerprint: "{node["fingerprint"]}"
     tls: true
     udp: true
+    tfo: true
     alpn:
       - http/1.1
     skip-cert-verify: false'''
@@ -2180,6 +2267,7 @@ Script version : ${SCRIPT_VERSION}
 Protocol       : ${PROTOCOL}
 Config file    : ${CONFIG_FILE}
 Artifact dir   : ${ARTIFACT_DIR}
+Network tuning : $([[ "${ENABLE_BBR}" == "1" ]] && printf 'BBR enabled (32MB TCP buffers, TFO)' || printf 'disabled')
 Cert renewal   : $([[ "${PROTOCOL}" == "trojan" ]] && printf 'certbot.timer' || printf 'not applicable')
 Auto sz Clash  : $([[ "${SKIP_SZ}" == "1" ]] && printf 'disabled' || printf 'enabled')
 EOF
@@ -2264,6 +2352,7 @@ Xray service   : $(systemctl is-active xray 2>/dev/null || true)
 Xray binary    : ${XRAY_BIN}
 Config file    : ${CONFIG_FILE}
 Config action  : preserved existing config
+Network tuning : $([[ "${ENABLE_BBR}" == "1" ]] && printf 'BBR enabled (32MB TCP buffers, TFO)' || printf 'disabled')
 Auto update    : $([[ "${AUTO_UPDATE_XRAY}" == "1" ]] && printf 'xray-auto-update.timer at %s' "${AUTO_UPDATE_TIME}" || printf 'disabled')
 Auto sz Clash  : $([[ "${SKIP_SZ}" == "1" ]] && printf 'disabled' || printf 'enabled')
 
@@ -2280,6 +2369,7 @@ sing-box service: $(systemctl is-active sing-box 2>/dev/null || true)
 sing-box binary : ${SING_BOX_BIN}
 Config file     : ${SING_BOX_CONFIG}
 Config action   : preserved existing config
+Network tuning  : $([[ "${ENABLE_BBR}" == "1" ]] && printf 'BBR enabled (32MB TCP buffers, TFO)' || printf 'disabled')
 Auto update     : disabled; upgrade through a reviewed release
 Auto sz Clash   : $([[ "${SKIP_SZ}" == "1" ]] && printf 'disabled' || printf 'enabled')
 
@@ -2298,6 +2388,7 @@ main() {
   confirm_plan
   install_dependencies
   ensure_required_commands
+  configure_network_tuning
   if [[ "${PROTOCOL}" == "trojan" ]] && systemctl is-active --quiet sing-box; then
     SING_BOX_WAS_ACTIVE="1"
   fi

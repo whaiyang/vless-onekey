@@ -101,6 +101,9 @@ sz /root/vless-export/shadowrocket-node.png
 - Reality 的可选自动更新由 `systemd` 管理：`xray-auto-update.timer` 和 `xray-auto-update.service`；Trojan 不创建 sing-box 自动更新定时器。
 - 可以传 `--xray-beta` 使用 Xray 最新预发布版本；如果同时启用自动更新，后续自动更新也会跟随预发布通道。
 - 会自动优先使用公网 IPv4；如果服务器只有 IPv6，会自动回落到 IPv6 并导出对应配置。
+- 默认自动启用 Google **BBR** 拥塞控制算法与 FQ 队列调度，并将 TCP 缓冲区上限提升至 32MB，解决长延迟跨洋链路下因默认 208KB 缓冲区锁死吞吐的痛点。持久化保存至 `/etc/sysctl.d/99-vless-onekey-tuning.conf`。如需跳过可传 `--skip-bbr`。
+- 服务端（Xray / sing-box）与客户端配置全面启用 **TCP Fast Open (TFO)** 与长连接保活，减少连接建立往返时延（节省 1 个 RTT）。
+- 导出的 Clash 配置文件（`<IP或域名>.yaml`）节点默认开启 `tfo: true`。
 - `shadowrocket-node.png` 适合直接给 `Shadowrocket` 扫码。
 - `<服务器IP或域名>.yaml` 适合 `Clash Verge / Clash Mi / Karing` 导入。
 - Trojan 服务端强制 TLS 1.2/1.3，客户端配置保持证书校验开启。私网和云元数据地址默认阻断；仅 `trojan-in` 到 `127.0.0.1:8080` 的 Nginx 回落连接被放行。
