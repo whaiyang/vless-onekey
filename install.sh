@@ -3,7 +3,7 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_NAME="install.sh"
-SCRIPT_VERSION="1.7.1"
+SCRIPT_VERSION="1.7.2"
 XRAY_INSTALLER_COMMIT="e741a4f56d368afbb9e5be3361b40c4552d3710d"
 XRAY_INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/${XRAY_INSTALLER_COMMIT}/install-release.sh"
 XRAY_AUTO_UPDATE_SCRIPT="/usr/local/sbin/xray-auto-update.sh"
@@ -490,18 +490,22 @@ auto_select_sni() {
     return
   fi
 
-  # 候选 SNI 列表（同 ASN 拓扑友好、TLS 1.3、无 CDN 代理）
+  if ! command_exists openssl; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq openssl >/dev/null 2>&1 || true
+  fi
+
+  # 候选 SNI 列表（高信誉大厂、支持 TLS 1.3、无免费 CDN、握手极其稳定）
   # 格式: "sni_host[:dest_host]"  —— 冒号后为可选的 dest_host（默认同 sni_host）
   local candidates=(
-    "www.swift.com"
-    "addons.mozilla.org"
-    "www.lovelive-anime.jp"
-    "www.visa.com"
     "www.nvidia.com"
+    "addons.mozilla.org"
+    "www.swift.com"
+    "www.visa.com"
     "www.bing.com"
-    "one.one.one.one"
     "www.speedtest.net"
     "dl.google.com"
+    "www.lovelive-anime.jp"
   )
 
   log "No --sni specified; auto-selecting from ${#candidates[@]} candidates ..."
