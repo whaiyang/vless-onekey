@@ -45,6 +45,22 @@ bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/i
 
 安装结束自动用 `sz` 下载 Clash YAML，不支持 ZMODEM 时加 `--skip-sz`。
 
+## Clash REALITY 连接失败
+
+新版 Xray 的 REALITY 握手要求支持 X25519-MLKEM768。导出的 YAML 已默认在 `reality-opts` 中启用 `support-x25519mlkem768: true`，请使用支持此选项的新版 Mihomo 客户端。
+
+如果旧配置提示 `REALITY authentication failed`，可先在节点的 `reality-opts` 中补上这一项。需要重新导出时，在服务器执行以下命令，无需重装服务或更换节点密钥：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/vless_export_assets.py \
+  -o /root/vless-export/vless_export_assets.py
+python3 /root/vless-export/vless_export_assets.py \
+  --node-url-file /root/vless-export/node.vless.txt \
+  --output-dir /root/vless-export
+```
+
+使用自定义导出目录时替换上述路径。重新导入生成的 YAML，并在 Clash Verge「订阅」中选中它后生效。
+
 ## 说明
 
 - **Reality** 使用 Xray，`--sni` 可选，不填自动从内置列表探测第一个可用的 TLS 1.3 站点

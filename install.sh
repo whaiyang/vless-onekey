@@ -3,7 +3,7 @@ set -Eeuo pipefail
 umask 077
 
 SCRIPT_NAME="install.sh"
-SCRIPT_VERSION="1.7.2"
+SCRIPT_VERSION="1.7.3"
 XRAY_INSTALLER_COMMIT="e741a4f56d368afbb9e5be3361b40c4552d3710d"
 XRAY_INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/${XRAY_INSTALLER_COMMIT}/install-release.sh"
 XRAY_AUTO_UPDATE_SCRIPT="/usr/local/sbin/xray-auto-update.sh"
@@ -1612,7 +1612,7 @@ except ImportError:  # pragma: no cover - optional dependency
     qrcode = None
 
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 DEFAULT_NODE_NAME = "vless-reality"
 DEFAULT_TROJAN_NODE_NAME = "trojan-tls"
 DEFAULT_FINGERPRINT = "chrome"
@@ -1798,6 +1798,7 @@ def build_clashverge_yaml(node: dict[str, str | int], mixed_port: int, controlle
     client-fingerprint: "{node["fingerprint"]}"
     flow: "{node["flow"]}"
     reality-opts:
+      support-x25519mlkem768: true
       public-key: "{node["public_key"]}"
       short-id: "{node["short_id"]}"'''
     else:

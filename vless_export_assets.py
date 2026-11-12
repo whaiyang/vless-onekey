@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover - optional dependency
     qrcode = None
 
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 DEFAULT_NODE_NAME = "vless-reality"
 DEFAULT_TROJAN_NODE_NAME = "trojan-tls"
 DEFAULT_FINGERPRINT = "chrome"
@@ -203,6 +203,7 @@ def build_clashverge_yaml(node: dict[str, str | int], mixed_port: int, controlle
     client-fingerprint: "{node["fingerprint"]}"
     flow: "{node["flow"]}"
     reality-opts:
+      support-x25519mlkem768: true
       public-key: "{node["public_key"]}"
       short-id: "{node["short_id"]}"'''
     else:
