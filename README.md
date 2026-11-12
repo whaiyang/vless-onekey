@@ -1,128 +1,51 @@
-# Xray VLESS Reality / sing-box Trojan TLS One-Click Installer
+# Xray VLESS Reality / sing-box Trojan TLS 一键安装
 
-One-click install Xray VLESS Reality or sing-box Trojan TLS on Debian and Ubuntu. The default remains VLESS Reality; Trojan is an explicit opt-in deployment that provisions a real TLS certificate, an Nginx fallback site, automatic renewal, and client export assets.
+Debian / Ubuntu 一键安装 Xray VLESS Reality 或 sing-box Trojan TLS。
 
-## 一键安装
+## 安装
 
-先选择一个与服务器同 ASN、支持 TLS 1.3、证书包含该域名且不是 Apple/iCloud 或免费 CDN 的目标站。脚本不会再随机猜测 SNI，并会在写配置前验证 TLS 1.3 和证书。
+**Reality（默认，无需域名）：**
 
 ```bash
-TARGET_DOMAIN="your-verified-target.example.com"
-bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/install.sh) -y --sni "${TARGET_DOMAIN}"
+# 自动选择 SNI
+bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/install.sh) -y
+
+# 手动指定 SNI
+bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/install.sh) -y --sni www.nvidia.com
 ```
 
-使用 Trojan TLS（需要一个只解析到本服务器的域名，Cloudflare 等 CDN/代理必须关闭）：
+**Trojan TLS（需要域名，DNS 直接指向本机，关闭 CDN）：**
 
 ```bash
-PROXY_DOMAIN="proxy.example.com"
 bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/install.sh) -y \
-  --protocol trojan --domain "${PROXY_DOMAIN}" --acme-email "you@example.com"
+  --protocol trojan --domain proxy.example.com --acme-email you@example.com
 ```
 
-Trojan 模式会让 sing-box 监听 `443/tcp`，把普通 HTTPS 回落到仅本机监听的 Nginx `127.0.0.1:8080`，并在 `80/tcp` 使用 ACME webroot 完成签发和续签。域名的 A/AAAA 记录必须直接指向该服务器；脚本发现解析不包含服务器公网地址时会停止。
-
-Trojan 安装完成后还会发布带 48 个十六进制字符（192 bit）随机令牌的 HTTPS Clash 订阅。把 `/root/vless-export/subscription-url.txt` 中的地址作为 URL 配置导入 Clash Verge，配置卡片右键即可使用“更新”和“分享二维码”。订阅路径关闭访问日志和缓存；该 URL 本身等同访问凭据，不要公开。若不需要远程订阅，可传 `--skip-clash-subscription`。
-
-查看参数：
+查看全部参数：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/install.sh) --help
 ```
 
-Reality 模式默认安装或升级到 Xray 最新稳定版，但关闭无人值守自动更新。需要显式启用每日自动更新时：
+## 生成文件
 
-```bash
-TARGET_DOMAIN="your-verified-target.example.com"
-bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/install.sh) -y --sni "${TARGET_DOMAIN}" --auto-update-xray
-```
+安装完成后导出到 `/root/vless-export/`：
 
-## 生成结果
+| 文件 | 用途 |
+|------|------|
+| `<IP或域名>.yaml` | Clash Verge / Clash Mi / Karing 配置 |
+| `shadowrocket-node.png` | Shadowrocket 扫码导入 |
+| `node.vless.txt` / `node.trojan.txt` | 节点链接 |
+| `shadowrocket.conf` | Shadowrocket 配置文件 |
+| `subscription-url.txt`（Trojan） | Clash Verge 远程订阅地址 |
 
-默认输出目录：
-
-```bash
-/root/vless-export
-```
-
-- `<服务器IP或域名>.yaml`
-  给 `Clash Verge / Clash Mi / Karing` 导入的配置文件。
-  默认只监听本机，不开放局域网访问，并内置 `AI`、`Telegram`、`Streaming` 单节点策略组。
-  Reality 使用服务器 IP 命名，Trojan 使用证书域名命名，Clash Verge 的配置卡片不会显示通用文件名。
-- `shadowrocket-node.png`
-  给 `Shadowrocket` 直接扫码导入的二维码。
-- `node.vless.txt` 或 `node.trojan.txt`
-  单节点 `vless://` 或 `trojan://` 链接文本。
-- `shadowrocket.conf`
-  `Shadowrocket` 配置文件。
-- `metadata.json`
-  节点参数明细，方便手工排查。
-- `README.txt`
-  服务器端生成结果说明。
-- `subscription-url.txt` 和 `subscription-qr.png`（Trojan）
-  给 Clash Verge 导入的 HTTPS 远程订阅地址及其二维码。远程配置卡片支持右键更新和分享二维码。
-
-## 下载到本地
-
-脚本会安装 `lrzsz`，执行完成后默认自动运行：
-
-也可以手动用 `sz` 下载：
-
-```bash
-sz /root/vless-export/*
-```
-
-只下载并导入节点配置文件：
-
-```bash
-sz /root/vless-export/<服务器IP或域名>.yaml
-```
-
-只下载二维码：
-
-```bash
-sz /root/vless-export/shadowrocket-node.png
-```
+安装结束自动用 `sz` 下载 Clash YAML，不支持 ZMODEM 时加 `--skip-sz`。
 
 ## 说明
 
-- Reality 使用 Xray，Trojan TLS 使用 sing-box。脚本发现当前协议对应的已有配置时默认保留；只有显式加 `--force-overwrite` 才会替换并先备份。要从 Reality 切换到 Trojan，必须明确传 `--protocol trojan --domain ... --force-overwrite`。
-- Reality 默认安装/更新 `Xray-core` 最新稳定版；如果服务器已有 `xray`，会通过官方安装器检查并升级。
-- Trojan 固定使用经过 SHA-256 校验的 sing-box `1.13.18` 官方发布包。版本升级随脚本发布审核，不启用无人值守二进制更新。
-- 如果需要保留服务器上已有的 `xray` 二进制，可以传 `--skip-xray-upgrade`。
-- 默认监听 `443/tcp`。最新 Xray 会对 Reality 使用非 443 端口发出封锁风险警告；如确需其它端口，必须同时传 `--allow-non-443`。Trojan 也建议保持 443。
-- Reality 模式下 `--sni` 为必填，`dest-host` 默认与 SNI 相同；脚本会验证目标支持 TLS 1.3 且证书匹配 SNI。Trojan 模式改用必填的 `--domain`。
-- Reality 默认关闭每日自动更新；可以传 `--auto-update-xray` 启用，默认时间为服务器本地时间 `03:30:00`。该选项不适用于 Trojan。
-- Trojan 的证书自动续签由 `certbot.timer` 管理，续签 hook 会先执行 `sing-box check`，只有配置和证书都有效时才重启 sing-box。
-- Xray 和 sing-box 分别以独立的非特权系统用户运行，并通过 systemd 仅保留绑定低端口所需的能力，同时限制文件系统、设备和内核访问。
-- 默认将 REALITY 最大握手时差限制为 `60000` 毫秒，服务器和客户端应保持时间同步。
-- 服务端默认阻断代理访问私网、链路本地地址和云元数据地址。
-- 后端配置、节点链接、二维码和导出文件会使用最小读取权限；分享链接等同访问凭据，不要公开。
-- 默认安装结束会自动执行 `sz /root/vless-export/<服务器IP或域名>.yaml`，如果终端不支持 ZMODEM，可以传 `--skip-sz`。
-- Reality 的可选自动更新由 `systemd` 管理：`xray-auto-update.timer` 和 `xray-auto-update.service`；Trojan 不创建 sing-box 自动更新定时器。
-- 可以传 `--xray-beta` 使用 Xray 最新预发布版本；如果同时启用自动更新，后续自动更新也会跟随预发布通道。
-- 会自动优先使用公网 IPv4；如果服务器只有 IPv6，会自动回落到 IPv6 并导出对应配置。
-- 默认自动启用 Google **BBR** 拥塞控制算法与 FQ 队列调度，并将 TCP 缓冲区上限提升至 32MB，解决长延迟跨洋链路下因默认 208KB 缓冲区锁死吞吐的痛点。持久化保存至 `/etc/sysctl.d/99-vless-onekey-tuning.conf`。如需跳过可传 `--skip-bbr`。
-- 服务端（Xray / sing-box）与客户端配置全面启用 **TCP Fast Open (TFO)** 与长连接保活，减少连接建立往返时延（节省 1 个 RTT）。
-- 导出的 Clash 配置文件（`<IP或域名>.yaml`）节点默认开启 `tfo: true`。
-- `shadowrocket-node.png` 适合直接给 `Shadowrocket` 扫码。
-- `<服务器IP或域名>.yaml` 适合 `Clash Verge / Clash Mi / Karing` 导入。
-- Trojan 服务端强制 TLS 1.2/1.3，客户端配置保持证书校验开启。私网和云元数据地址默认阻断；仅 `trojan-in` 到 `127.0.0.1:8080` 的 Nginx 回落连接被放行。
-
-查看自动更新状态：
-
-```bash
-systemctl status xray-auto-update.timer
-journalctl -u xray-auto-update.service --no-pager
-systemctl status sing-box
-journalctl -u sing-box --no-pager
-systemctl status certbot.timer
-certbot certificates
-```
-
-检查目标站是否适合 REALITY：
-
-```bash
-xray tls ping your-verified-target.example.com:443
-```
-
-安装成功后仍应从外部网络验证 `443/tcp` 可达，并用实际客户端完成一次代理请求。脚本的配置检查和服务状态检查不能替代端到端验证。
+- **Reality** 使用 Xray，`--sni` 可选，不填自动从内置列表探测第一个可用的 TLS 1.3 站点
+- **Trojan** 使用 sing-box，需要 `--domain`，自动申请 Let's Encrypt 证书并配置续签
+- 已有配置默认保留，`--force-overwrite` 才覆盖（先备份）
+- 默认启用 BBR + 32MB TCP 缓冲 + TCP Fast Open
+- Xray / sing-box 以非特权用户运行，systemd 最小化能力
+- 服务端默认阻断私网、链路本地、云元数据地址出站
