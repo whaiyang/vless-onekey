@@ -1,9 +1,9 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -Eeuo pipefail
 umask 077
 
 SCRIPT_NAME="install.sh"
-SCRIPT_VERSION="1.7.0"
+SCRIPT_VERSION="1.7.1"
 XRAY_INSTALLER_COMMIT="e741a4f56d368afbb9e5be3361b40c4552d3710d"
 XRAY_INSTALLER_URL="https://raw.githubusercontent.com/XTLS/Xray-install/${XRAY_INSTALLER_COMMIT}/install-release.sh"
 XRAY_AUTO_UPDATE_SCRIPT="/usr/local/sbin/xray-auto-update.sh"
@@ -110,7 +110,7 @@ Usage:
 Options:
   --protocol VALUE          Deployment protocol: reality or trojan. Default: ${PROTOCOL}
   --port PORT               Public proxy listen port. Default: 443
-  --sni HOST                Required SNI and Reality serverNames; choose a verified same-ASN TLS 1.3 site
+  --sni HOST                Optional SNI for Reality serverNames; auto-selected from built-in candidate list if omitted
   --dest-host HOST          Reality dest host. Default: same as --sni
   --dest-port PORT          Reality dest port. Default: ${DEST_PORT}
   --max-time-diff-ms MS     Reject stale Reality handshakes beyond this clock skew. Default: ${MAX_TIME_DIFF_MS}
@@ -140,6 +140,7 @@ Options:
 
 Examples:
   bash ${SCRIPT_NAME} -y --sni www.example.com
+  bash ${SCRIPT_NAME} -y                                   # auto-select SNI from built-in candidate list
   bash ${SCRIPT_NAME} -y --sni www.example.com --node-name my-vps --force-overwrite
   bash ${SCRIPT_NAME} -y --protocol trojan --domain proxy.example.com
 
@@ -433,8 +434,8 @@ validate_args() {
   (( PORT >= 1 && PORT <= 65535 )) || die "--port must be between 1 and 65535"
 
   if [[ "${PROTOCOL}" == "reality" ]]; then
-    [[ -n "${SNI}" ]] || die "--sni is required for Reality. Choose a verified same-ASN TLS 1.3 target."
-    [[ "${SNI}" =~ ^[A-Za-z0-9.-]+$ ]] || die "Invalid --sni value: ${SNI}"
+    # SNI is optional; auto_select_sni() will fill it in if empty
+    [[ -z "${SNI}" || "${SNI}" =~ ^[A-Za-z0-9.-]+$ ]] || die "Invalid --sni value: ${SNI}"
     [[ -z "${DEST_HOST}" || "${DEST_HOST}" =~ ^[A-Za-z0-9.-]+$ ]] || die "Invalid --dest-host value: ${DEST_HOST}"
     [[ -z "${DOMAIN}" ]] || die "--domain is only valid with --protocol trojan"
     [[ -z "${ACME_EMAIL}" ]] || die "--acme-email is only valid with --protocol trojan"
@@ -477,6 +478,57 @@ ensure_defaults() {
   if [[ -z "${NODE_NAME}" ]]; then
     NODE_NAME="$(hostname)"
   fi
+}
+
+# ---------------------------------------------------------------------------
+# 当用户未传 --sni 时，从内置候选列表中自动探测第一个支持 TLS 1.3 且证书有效的站点。
+# 候选站点均为知名大厂、同 ASN 拓扑友好、证书不含 Apple iCloud / 免费 CDN 的域名。
+# 探测顺序固定；任意一个通过即停止，全部失败则报错要求用户手动指定 --sni。
+# ---------------------------------------------------------------------------
+auto_select_sni() {
+  if [[ "${PROTOCOL}" != "reality" || -n "${SNI}" ]]; then
+    return
+  fi
+
+  # 候选 SNI 列表（同 ASN 拓扑友好、TLS 1.3、无 CDN 代理）
+  # 格式: "sni_host[:dest_host]"  —— 冒号后为可选的 dest_host（默认同 sni_host）
+  local candidates=(
+    "www.swift.com"
+    "addons.mozilla.org"
+    "www.lovelive-anime.jp"
+    "www.visa.com"
+    "www.nvidia.com"
+    "www.bing.com"
+    "one.one.one.one"
+    "www.speedtest.net"
+    "dl.google.com"
+  )
+
+  log "No --sni specified; auto-selecting from ${#candidates[@]} candidates ..."
+  local entry sni dest tls_out
+  for entry in "${candidates[@]}"; do
+    sni="${entry%%:*}"
+    dest="${entry#*:}"   # equals sni when no colon
+    log "  Trying SNI candidate: ${sni}"
+    tls_out="$(
+      timeout 10 openssl s_client \
+        -connect "${dest}:443" \
+        -servername "${sni}" \
+        -verify_hostname "${sni}" \
+        -tls1_3 </dev/null 2>&1
+    )" || { warn "  ${sni}: TLS 1.3 handshake failed"; continue; }
+    if ! grep -q "Verify return code: 0 (ok)" <<<"${tls_out}"; then
+      warn "  ${sni}: certificate verification failed"
+      continue
+    fi
+    SNI="${sni}"
+    DEST_HOST="${dest}"
+    log "Auto-selected SNI: ${SNI}  dest: ${DEST_HOST}:${DEST_PORT}"
+    return
+  done
+
+  die "Could not find a reachable TLS 1.3 SNI candidate from the built-in list. \
+Please re-run with --sni <verified-tls13-domain> to specify one manually."
 }
 
 confirm_plan() {
@@ -2384,6 +2436,7 @@ main() {
   detect_os
   detect_existing_nginx
   validate_args
+  auto_select_sni       # fills SNI/DEST_HOST when --sni was omitted (Reality only)
   ensure_defaults
   confirm_plan
   install_dependencies
@@ -2459,3 +2512,4 @@ main() {
 }
 
 main "$@"
+
