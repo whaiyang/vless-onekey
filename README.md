@@ -6,11 +6,15 @@ Debian / Ubuntu 一键安装 Xray VLESS Reality 或 sing-box Trojan TLS。
 
 **Reality（默认，无需域名）：**
 
-```bash
-# 自动选择 SNI
-bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/install.sh) -y
+自动选择 SNI：
 
-# 手动指定 SNI
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/install.sh) -y
+```
+
+手动指定 SNI：
+
+```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/install.sh) -y --sni www.nvidia.com
 ```
 
