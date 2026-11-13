@@ -88,6 +88,8 @@ def parse_node_link(link: str) -> dict[str, str | int]:
     port = parsed.port or 0
     if not server or not port:
         raise ValueError("Missing server or port")
+    if not name or name in {DEFAULT_NODE_NAME, DEFAULT_TROJAN_NODE_NAME}:
+        name = server or default_name
     sni = q1("sni", q1("servername", ""))
     if scheme == "vless":
         uuid = urllib.parse.unquote(parsed.username or "")

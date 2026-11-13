@@ -117,7 +117,7 @@ Options:
   --domain HOST             Trojan TLS certificate domain; DNS must point directly to this server
   --acme-email EMAIL        Optional Let's Encrypt ACME account email for Trojan TLS
   --allow-non-443           Explicitly allow a non-443 listen or target port
-  --node-name NAME          Exported node name. Default: server hostname
+  --node-name NAME          Exported node name. Default: server public IP
   --fingerprint VALUE       Client fingerprint for exports. Default: ${CLIENT_FINGERPRINT}
   --artifact-dir PATH       Directory for generated files. Default: ${ARTIFACT_DIR}
   --public-ip IP            Override auto-detected public IP
@@ -476,7 +476,10 @@ ensure_defaults() {
     CONFIG_FILE="${SING_BOX_CONFIG}"
   fi
   if [[ -z "${NODE_NAME}" ]]; then
-    NODE_NAME="$(hostname)"
+    if [[ -z "${PUBLIC_IP}" ]]; then
+      detect_public_ip
+    fi
+    NODE_NAME="${PUBLIC_IP:-$(hostname)}"
   fi
 }
 
@@ -1683,6 +1686,8 @@ def parse_node_link(link: str) -> dict[str, str | int]:
     port = parsed.port or 0
     if not server or not port:
         raise ValueError("Missing server or port")
+    if not name or name in {DEFAULT_NODE_NAME, DEFAULT_TROJAN_NODE_NAME}:
+        name = server or default_name
     sni = q1("sni", q1("servername", ""))
     if scheme == "vless":
         uuid = urllib.parse.unquote(parsed.username or "")
