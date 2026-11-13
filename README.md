@@ -43,7 +43,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/whaiyang/vless-onekey/main/i
 | `shadowrocket.conf` | Shadowrocket 配置文件 |
 | `subscription-url.txt`（Trojan） | Clash Verge 远程订阅地址 |
 
-安装结束自动用 `sz` 下载 Clash YAML，不支持 ZMODEM 时加 `--skip-sz`。
+安装结束自动用 `sz` 下载 Clash YAML 配置和二维码图片，不支持 ZMODEM 时加 `--skip-sz`。
 
 ## Clash REALITY 连接失败
 

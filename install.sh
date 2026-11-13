@@ -133,7 +133,7 @@ Options:
   --skip-bbr                Skip TCP BBR and network buffer tuning (enabled by default)
   --skip-qr                 Do not generate Shadowrocket QR PNG
   --skip-clash-subscription Trojan only: do not publish a token-protected HTTPS Clash subscription
-  --skip-sz                 Do not auto-download the server-named Clash YAML with sz at the end
+  --skip-sz                 Do not auto-download Clash YAML and QR code with sz at the end
   -y, --yes                 Run non-interactively
   -V, --version             Show script version
   -h, --help                Show this help
@@ -2246,7 +2246,7 @@ Notes:
   - sz requires a ZMODEM-capable terminal such as Xshell, SecureCRT, or MobaXterm.
   - shadowrocket-node.png is a ${PROTOCOL} QR code for direct Shadowrocket scanning.
   - ${CLASH_YAML_NAME} is intended for Clash Verge, Clash Mi, or Karing, and Clash Verge displays the server address as the profile name.
-  - install.sh automatically runs: sz ${ARTIFACT_DIR}/${CLASH_YAML_NAME}
+  - install.sh automatically runs: sz ${ARTIFACT_DIR}/${CLASH_YAML_NAME} ${ARTIFACT_DIR}/shadowrocket-node.png
 EOF
 }
 
@@ -2363,7 +2363,7 @@ EOF
 }
 
 send_clashverge_yaml() {
-  local target
+  local targets=()
   if [[ -z "${CLASH_YAML_NAME}" && -f "${ARTIFACT_DIR}/metadata.json" ]]; then
     CLASH_YAML_NAME="$(
       python3 - "${ARTIFACT_DIR}/metadata.json" <<'PY'
@@ -2378,32 +2378,45 @@ PY
   if [[ -z "${CLASH_YAML_NAME}" ]]; then
     CLASH_YAML_NAME="${PUBLIC_IP}.yaml"
   fi
-  target="${ARTIFACT_DIR}/${CLASH_YAML_NAME}"
+
+  local clash_target="${ARTIFACT_DIR}/${CLASH_YAML_NAME}"
+  local qr_target="${ARTIFACT_DIR}/shadowrocket-node.png"
+  local sub_qr_target="${ARTIFACT_DIR}/subscription-qr.png"
 
   if [[ "${SKIP_SZ}" == "1" ]]; then
-    log "Skipping automatic Clash YAML download by request"
+    log "Skipping automatic artifact download by request"
     return
   fi
 
-  if [[ ! -f "${target}" ]]; then
-    warn "Clash YAML was not found at ${target}; skipping automatic sz download."
+  if [[ -f "${clash_target}" ]]; then
+    targets+=("${clash_target}")
+  fi
+  if [[ -f "${qr_target}" ]]; then
+    targets+=("${qr_target}")
+  fi
+  if [[ -f "${sub_qr_target}" ]]; then
+    targets+=("${sub_qr_target}")
+  fi
+
+  if (( ${#targets[@]} == 0 )); then
+    warn "No artifacts found to download; skipping automatic sz download."
     return
   fi
 
   if ! command_exists sz; then
-    warn "sz is not installed; skipping automatic Clash YAML download."
-    warn "Install lrzsz or download manually: ${target}"
+    warn "sz is not installed; skipping automatic artifact download."
+    warn "Install lrzsz or download manually: ${targets[*]}"
     return
   fi
 
   if [[ ! -t 1 ]]; then
     warn "stdout is not a terminal; skipping automatic sz download."
-    warn "Download manually later with: sz ${target}"
+    warn "Download manually later with: sz ${targets[*]}"
     return
   fi
 
-  log "Starting automatic download: sz ${target}"
-  sz "${target}" || warn "Automatic sz download failed. You can run manually: sz ${target}"
+  log "Starting automatic download: sz ${targets[*]}"
+  sz "${targets[@]}" || warn "Automatic sz download failed. You can run manually: sz ${targets[*]}"
 }
 
 print_maintenance_summary() {
