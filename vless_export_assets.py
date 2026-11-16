@@ -318,6 +318,7 @@ proxy-groups:
 rules:
 {server_direct_rule}
   - DOMAIN-SUFFIX,freemodel.dev,DIRECT
+  - DOMAIN-SUFFIX,apple.com,DIRECT
   - DOMAIN-SUFFIX,local,DIRECT
   - DOMAIN-SUFFIX,localhost,DIRECT
   - DOMAIN-SUFFIX,lan,DIRECT
@@ -405,6 +406,7 @@ ipv6 = true
 PROXY = select, {name}, DIRECT
 
 [Rule]
+DOMAIN-SUFFIX,apple.com,DIRECT
 FINAL,PROXY
 """
 

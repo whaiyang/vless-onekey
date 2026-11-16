@@ -63,6 +63,7 @@ python3 /root/vless-export/vless_export_assets.py \
 
 ## 说明
 
+- 导出的 Clash 和 Shadowrocket 配置默认将 `apple.com` 及其所有子域名直连，规则优先于通用代理规则
 - **Reality** 使用 Xray，`--sni` 可选，不填自动从内置列表探测第一个可用的 TLS 1.3 站点
 - **Trojan** 使用 sing-box，需要 `--domain`，自动申请 Let's Encrypt 证书并配置续签
 - 已有配置默认保留，`--force-overwrite` 才覆盖（先备份）
